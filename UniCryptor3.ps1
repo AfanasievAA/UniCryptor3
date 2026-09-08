@@ -22,9 +22,9 @@
       plus utilities for inspecting container information.
 
 .NOTES
-  Version:        0.1
+  Version:        0.2
   Author:         Andrew Afanasiev
-  Date:           03.09.2026
+  Date:           08.09.2026
   Contacts:       AfanasievAA@yandex.ru
   Changes:
     • Initial release
