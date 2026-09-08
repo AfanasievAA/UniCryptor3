@@ -22,7 +22,7 @@ UniCryptor3GUI.ps1
       with progress indication
 
 .NOTES
-  Version:        0.1
+  Version:        0.2
   Author:         Andrew Afanasiev
   Date:           08.09.2026
   Contacts:       AfanasievAA@yandex.ru
@@ -31,7 +31,7 @@ UniCryptor3GUI.ps1
                   modules\Localization.ps1
                   localization\strings.en.json (+ optional strings.<lang>.json)
   Changes:
-    • Initial release
+    • New features
 
 .EXAMPLE
   # Launch the GUI (auto-relaunches with -STA if needed)
@@ -66,21 +66,21 @@ UniCryptor3GUI.ps1
     • Encrypted outputs are displayed in Base64 format for safe copying
 #>
 
-$ErrorActionPreference = 'Stop'
+ $ErrorActionPreference = 'Stop'
 # WinForms and the clipboard require an STA thread; relaunch under pwsh -STA if needed
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA' -and $PSCommandPath) {
     Start-Process pwsh -ArgumentList @('-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $PSCommandPath)
     exit
 }
 
-$script:LibraryFileName = 'UniCryptor3.ps1'
-$script:UCScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-$script:LibPath = Join-Path $script:UCScriptRoot $script:LibraryFileName
+ $script:LibraryFileName = 'UniCryptor3.ps1'
+ $script:UCScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+ $script:LibPath = Join-Path $script:UCScriptRoot $script:LibraryFileName
 
 if (-not (Test-Path -LiteralPath $script:LibPath)) { throw "Library not found: $script:LibPath" }
 
 # Localization module in modules\, string files in localization\ (resolved by Localization.ps1 itself)
-$script:LocModulePath = Join-Path (Join-Path $script:UCScriptRoot 'modules') 'Localization.ps1'
+ $script:LocModulePath = Join-Path (Join-Path $script:UCScriptRoot 'modules') 'Localization.ps1'
 
 if (-not (Test-Path -LiteralPath $script:LocModulePath)) { throw "Localization module not found: $script:LocModulePath" }
 
@@ -92,11 +92,69 @@ try { Initialize-Localization } catch { throw "Localization init failed: $($_.Ex
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# ConvertToDataTable function
+function ConvertToDataTable {
+    param(
+        $InputObject,
+        [System.Data.DataTable]$OutputTable,
+        [switch]$RetainColumns,
+        [switch]$FilterWMIProperties
+    )
+    if (-Not $InputObject) { return $null }
+    if ($null -eq $OutputTable) { $OutputTable = New-Object System.Data.DataTable }
+    
+    if ($InputObject -is [System.Data.DataTable]) {
+        $OutputTable = $InputObject
+    } else {
+        if (-not $RetainColumns -or $OutputTable.Columns.Count -eq 0) {
+            $OutputTable.Clear()
+            $object = $null
+            foreach ($item in $InputObject) {
+                if ($null -ne $item) { $object = $item; break }
+            }
+            if ($null -eq $object) { return $null }
+
+            # Get all the properties in order to create the columns
+            foreach ($prop in $object.PSObject.Get_Properties()) {
+                if (-not $FilterWMIProperties -or -not $prop.Name.StartsWith('__')) {
+                    $type = $null
+                    if ($null -ne $prop.Value) {
+                        try { $type = $prop.Value.GetType() } catch { }
+                    }
+                    if ($null -ne $type) {
+                        $null = $OutputTable.Columns.Add($prop.Name, $type)
+                    } else {
+                        $null = $OutputTable.Columns.Add($prop.Name)
+                    }
+                }
+            }
+            if ($object -is [System.Data.DataRow]) {
+                foreach ($item in $InputObject) { $null = $OutputTable.Rows.Add($item) }
+                return @(, $OutputTable)
+            }
+        } else {
+            $OutputTable.Rows.Clear()
+        }
+
+        foreach ($item in $InputObject) {
+            $row = $OutputTable.NewRow()
+            if ($item) {
+                # Copy values directly, no dynamic code generation
+                foreach ($prop in $item.PSObject.Get_Properties()) {
+                    if ($OutputTable.Columns.Contains($prop.Name) -and $null -ne $prop.Value) { $row[$prop.Name] = $prop.Value }
+                }
+            }
+            $null = $OutputTable.Rows.Add($row)
+        }
+    }
+    return ,$OutputTable
+}
+
 # Shared state and worker engine
-$script:sync = [hashtable]::Synchronized(@{ State = 'Idle'; Tag = ''; Result = $null; Error = $null; StatusText = ''; Percent = -1; Language = 'en' })
-$script:jobs = [System.Collections.Generic.List[object]]::new()
-$script:SelectedThumbprints = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-$script:TextBindings = [System.Collections.Generic.List[object]]::new()
+ $script:sync = [hashtable]::Synchronized(@{ State = 'Idle'; Tag = ''; Result = $null; Error = $null; StatusText = ''; Percent = -1; Language = 'en' })
+ $script:jobs = [System.Collections.Generic.List[object]]::new()
+ $script:SelectedThumbprints = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+ $script:TextBindings = [System.Collections.Generic.List[object]]::new()
 
 # Set the status label text
 function Set-UcStatus { param([string]$Text) $script:statusLabel.Text = $Text }
@@ -111,6 +169,7 @@ function Bind-UcText {
 # Apply localization to all registered controls
 function Apply-UcLocalization {
     foreach ($b in $script:TextBindings) { $b.Control.Text = Get-String -Key $b.Key }
+    # Grid headers are auto-generated from DataTable column names; no manual updates needed
     Update-UcSelectionLabel
     if ($script:sync.State -eq 'Idle') { Set-UcStatus (Get-String -Key 'status.ready') }
 }
@@ -144,7 +203,7 @@ function Start-UcOperation {
 }
 
 # Worker bodies (each receives $ctx = $script:sync and runs inside a worker runspace)
-$script:bodies = @{
+ $script:bodies = @{
     ProtectString = {
         param($ctx)
         try {
@@ -327,7 +386,7 @@ function Show-UcFileInfoResult {
 function Complete-UcOperation {
     if ($script:sync.Error) {
         Set-UcStatus (Get-String -Key 'status.error' -Params @([string]$script:sync.Error))
-        # Clear result fields on error
+        # Clear result fields on error; arcPathBox holds user input and is never cleared
         switch ($script:sync.Tag) {
             'ProtectString' { $script:stringOutBox.Text = '' }
             'UnprotectString' { $script:unprotectOutBox.Text = '' }
@@ -335,7 +394,6 @@ function Complete-UcOperation {
             'UnprotectFile' { $script:fileResultBox.Text = '' }
             'ProtectFolder' { $script:folderResultBox.Text = '' }
             'UnprotectFolder' { $script:folderResultBox.Text = '' }
-            'Compress' { $script:arcPathBox.Text = '' }
             'ArchivePassword' { $script:arcPasswordBox.Text = '' }
             'ArchiveContent' { $script:archiveListView.Items.Clear() }
             'FileInfo' { $script:infoTextBox.Text = ''; $script:infoListView.Items.Clear() }
@@ -357,10 +415,18 @@ function Complete-UcOperation {
         'ArchivePassword' { $script:arcPasswordBox.Text = [string]$script:sync.Result; Set-UcStatus (Get-String -Key 'archive.status.password') }
         'FileInfo' { Show-UcFileInfoResult }
         'NewCert' {
+            $tp = $script:sync.Result.Thumbprint
+            # Mark as selected before rebuilding so the new row passes the active search filter
+            $null = $script:SelectedThumbprints.Add($tp)
             Update-UcCertificateList
-            $tp = $script:sync.Result.Thumbprint; $idx = 0
-            for ($i = 0; $i -lt $script:certListView.Items.Count; $i++) { if ($script:certListView.Items[$i].Tag.Thumbprint -eq $tp) { $script:certListView.Items[$i].Checked = $true; $idx = $i } }
-            $script:certListView.EnsureVisible($idx)
+            foreach ($row in $script:certGridView.Rows) {
+                if ($row.Cells['Thumbprint'].Value -eq $tp) {
+                    # IsChecked comes pre-set from the data build
+                    $script:certGridView.FirstDisplayedScrollingRowIndex = $row.Index
+                    break
+                }
+            }
+            Update-UcSelectionLabel
             Set-UcStatus (Get-String -Key 'cert.status.created' -Params @($tp))
         }
         default { Set-UcStatus (Get-String -Key 'status.ready') }
@@ -406,14 +472,16 @@ function Copy-UcText { param($Text)
     catch { Set-UcStatus (Get-String -Key 'status.copyFailed' -Params @($_.Exception.Message)) }
 }
 
-# Get selected certificates
+# Get selected certificates from the data table, not the grid rows, so the search filter cannot hide a selection
 function Get-UcSelectedCertificates {
     $list = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
-    foreach ($item in $script:certListView.Items) {
-        if ($item.Checked -and $null -ne $item.Tag) {
-            $c = $item.Tag
-            # Include all selected certificates, regardless of private key presence
-            $list.Add($c)
+    $dt = $script:certGridView.DataSource -as [System.Data.DataTable]
+    if ($null -ne $dt) {
+        foreach ($row in $dt.Rows) {
+            if ($row['IsChecked'] -eq $true) {
+                $cert = $row['CertificateObject'] -as [System.Security.Cryptography.X509Certificates.X509Certificate2]
+                if ($null -ne $cert) { $list.Add($cert) }
+            }
         }
     }
     return $list.ToArray()
@@ -423,19 +491,13 @@ function Update-UcSelectionLabel {
     $script:lblCertSelection.Text = Get-String -Key 'cert.selection.label' -Params @($script:SelectedThumbprints.Count)
 }
 
-# Update certificate list view using DataTable binding
+# Update certificate list: build DataTable, bind it, columns are generated automatically
 function Update-UcCertificateList {
     $certs = @(Get-UCCertificates)
-    # Build DataTable with certificate data
-    $dt = New-Object System.Data.DataTable
-    $null = $dt.Columns.Add('Subject', [string])
-    $null = $dt.Columns.Add('Thumbprint', [string])
-    $null = $dt.Columns.Add('ValidTo', [string])
-    $null = $dt.Columns.Add('HasPrivateKey', [string])
-    $null = $dt.Columns.Add('CertificateObject', [System.Security.Cryptography.X509Certificates.X509Certificate2])
-    $null = $dt.Columns.Add('IsChecked', [bool])
-    
+    # Build data objects for DataTable
+    $data = [System.Collections.Generic.List[pscustomobject]]::new()
     $existing = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    
     foreach ($c in $certs) {
         $null = $existing.Add($c.Thumbprint)
         try {
@@ -443,165 +505,222 @@ function Update-UcCertificateList {
         } catch {
             $hasPriv = $false
         }
-        $row = $dt.NewRow()
-        $row.Subject = $c.Subject
-        $row.Thumbprint = $c.Thumbprint
-        $row.ValidTo = $c.NotAfter.ToString('yyyy-MM-dd')
-        $row.HasPrivateKey = if ($hasPriv) { Get-String -Key 'cert.priv.yes' } else { Get-String -Key 'cert.priv.no' }
-        $row.CertificateObject = $c
-        $row.IsChecked = $script:SelectedThumbprints.Contains($c.Thumbprint)
-        $null = $dt.Rows.Add($row)
+        # IsChecked goes first to become the first grid column
+        $data.Add([pscustomobject]@{
+            IsChecked = $script:SelectedThumbprints.Contains($c.Thumbprint)
+            Subject = $c.Subject
+            Thumbprint = $c.Thumbprint
+            ValidTo = $c.NotAfter.ToString('yyyy-MM-dd')
+            HasPrivateKey = if ($hasPriv) { Get-String -Key 'cert.priv.yes' } else { Get-String -Key 'cert.priv.no' }
+            CertificateObject = $c
+        })
     }
     # Drop thumbprints that no longer exist in the store
     $null = $script:SelectedThumbprints.RemoveWhere({ param($tp) -not $existing.Contains($tp) })
     
-    # Set DataSource for the ListView using DataTable binding
-    $script:certListView.BeginUpdate()
-    try {
-        $script:certListView.Items.Clear()
-        $script:certListView.View = 'Details'
-        $script:certListView.FullRowSelect = $true
-        $script:certListView.GridLines = $true
-        $script:certListView.CheckBoxes = $true
-        
-        foreach ($row in $dt.Rows) {
-            $item = [System.Windows.Forms.ListViewItem]::new([string]$row.Subject)
-            $null = $item.SubItems.Add([string]$row.Thumbprint)
-            $null = $item.SubItems.Add([string]$row.ValidTo)
-            $null = $item.SubItems.Add([string]$row.HasPrivateKey)
-            $item.Tag = $row.CertificateObject
-            $item.Checked = [bool]$row.IsChecked
-            $null = $script:certListView.Items.Add($item)
-        }
-    } finally { $script:certListView.EndUpdate() }
+    # Convert to DataTable and bind; grid columns are generated automatically from the table columns
+    $dt = ConvertToDataTable -InputObject $data
+    if ($null -eq $dt) {
+        $script:certGridView.DataSource = $null
+        Update-UcSelectionLabel
+        return
+    }
+    $script:certGridView.DataSource = $dt
+
+    # Post-binding tweaks: all columns already exist, generated from the DataTable
+    # Hide the raw certificate column (data-only, used by Get-UcSelectedCertificates)
+    $script:certGridView.Columns['CertificateObject'].Visible = $false
+    # Data columns read-only; the IsChecked checkbox stays clickable
+    foreach ($name in @('Subject', 'Thumbprint', 'ValidTo', 'HasPrivateKey', 'CertificateObject')) {
+        $script:certGridView.Columns[$name].ReadOnly = $true
+    }
+    # Fill mode ignores plain Width; proportions via FillWeight
+    $script:certGridView.Columns['Subject'].FillWeight = 38
+    $script:certGridView.Columns['Thumbprint'].FillWeight = 26
+    $script:certGridView.Columns['ValidTo'].FillWeight = 14
+    $script:certGridView.Columns['HasPrivateKey'].FillWeight = 17
+    $script:certGridView.Columns['IsChecked'].FillWeight = 5
+
+    # Re-apply the active search filter to the freshly bound table
+    Update-UcCertFilter
     Update-UcSelectionLabel
 }
 
+# Quick search: show certificates matching the subject plus all already selected ones
+function Update-UcCertFilter {
+    $dt = $script:certGridView.DataSource -as [System.Data.DataTable]
+    if ($null -eq $dt) { return }
+    $q = $script:certSearchBox.Text.Trim()
+    if ([string]::IsNullOrEmpty($q)) { $dt.DefaultView.RowFilter = ''; return }
+    # Escape RowFilter/LIKE special characters one by one to avoid nested replacement bugs
+    $esc = [System.Text.StringBuilder]::new()
+    foreach ($ch in $q.ToCharArray()) {
+        switch ($ch) {
+            "'" { $null = $esc.Append("''") }
+            '%' { $null = $esc.Append('[%]') }
+            '*' { $null = $esc.Append('[*]') }
+            '[' { $null = $esc.Append('[[]') }
+            ']' { $null = $esc.Append('[]]') }
+            default { $null = $esc.Append($ch) }
+        }
+    }
+    # Case-insensitive by default; selected certificates always stay visible
+    $dt.DefaultView.RowFilter = "Subject LIKE '%$($esc.ToString())%' OR IsChecked = True"
+}
 # ---------- Form ----------
-$script:mainForm = [System.Windows.Forms.Form]::new()
-$script:mainForm.Text = 'UniCryptor3'
-$script:mainForm.ClientSize = [System.Drawing.Size]::new(900, 660)
-$script:mainForm.MinimumSize = [System.Drawing.Size]::new(820, 640)
-$script:mainForm.StartPosition = 'CenterScreen'
-$script:mainForm.Font = [System.Drawing.Font]::new('Segoe UI', 9)
+ $script:mainForm = [System.Windows.Forms.Form]::new()
+ $script:mainForm.Text = 'UniCryptor3'
+ $script:mainForm.ClientSize = [System.Drawing.Size]::new(900, 660)
+ $script:mainForm.MinimumSize = [System.Drawing.Size]::new(820, 640)
+ $script:mainForm.StartPosition = 'CenterScreen'
+ $script:mainForm.Font = [System.Drawing.Font]::new('Segoe UI', 9)
 
-$script:mainTabControl = [System.Windows.Forms.TabControl]::new()
-$script:mainTabControl.Dock = 'Fill'
-$script:mainForm.Controls.Add($script:mainTabControl)
+ $script:mainTabControl = [System.Windows.Forms.TabControl]::new()
+ $script:mainTabControl.Dock = 'Fill'
+ $script:mainForm.Controls.Add($script:mainTabControl)
 
 # --- Tab: Certificates ---
-$tabCert = [System.Windows.Forms.TabPage]::new()
-$tabCert.Size = [System.Drawing.Size]::new(900, 660)
+ $tabCert = [System.Windows.Forms.TabPage]::new()
+ $tabCert.Size = [System.Drawing.Size]::new(900, 660)
 Bind-UcText $tabCert 'tab.certificates'
 
-$script:certListView = Add-UcCtl $tabCert ([System.Windows.Forms.ListView]) 10 10 866 340 'Left,Top,Right' @{ View = 'Details'; CheckBoxes = $true; FullRowSelect = $true; GridLines = $true }
-$null = $script:certListView.Columns.Add('S', 320)
-$null = $script:certListView.Columns.Add('T', 240)
-$null = $script:certListView.Columns.Add('V', 110)
-$null = $script:certListView.Columns.Add('P', 120)
-Bind-UcText $script:certListView.Columns[0] 'cert.column.subject'
-Bind-UcText $script:certListView.Columns[1] 'cert.column.thumbprint'
-Bind-UcText $script:certListView.Columns[2] 'cert.column.validTo'
-Bind-UcText $script:certListView.Columns[3] 'cert.column.privateKey'
-
-$script:certListView.Add_ItemChecked({ param($s, $e)
-    if ($null -eq $e.Item -or $null -eq $e.Item.Tag) { return }
-    $tp = $e.Item.Tag.Thumbprint
-    if ($e.Item.Checked) { $null = $script:SelectedThumbprints.Add($tp) } else { $null = $script:SelectedThumbprints.Remove($tp) }
+# Columns are generated automatically from the bound DataTable (see Update-UcCertificateList)
+ $script:certGridView = Add-UcCtl $tabCert ([System.Windows.Forms.DataGridView]) 10 10 866 340 'Left,Top,Right' @{ 
+    AutoSizeColumnsMode = 'Fill'
+    SelectionMode = 'FullRowSelect'
+    MultiSelect = $false
+    # Grid-level ReadOnly would lock the checkbox column too; data columns are locked after binding
+    ReadOnly = $false
+    AllowUserToAddRows = $false
+    AllowUserToDeleteRows = $false
+    RowHeadersVisible = $false
+    AllowUserToOrderColumns = $false
+}
+# Commit checkbox edits immediately so CellValueChanged fires on every click
+ $script:certGridView.Add_CurrentCellDirtyStateChanged({
+    if ($script:certGridView.IsCurrentCellDirty) { $script:certGridView.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit) }
+})
+ $script:certGridView.Add_CellValueChanged({ param($s, $e)
+    if ($e.RowIndex -lt 0 -or $s.Columns[$e.ColumnIndex].Name -ne 'IsChecked') { return }
+    $row = $s.Rows[$e.RowIndex]
+    $tp = [string]$row.Cells['Thumbprint'].Value
+    if ([bool]$row.Cells['IsChecked'].Value) { $null = $script:SelectedThumbprints.Add($tp) } else { $null = $script:SelectedThumbprints.Remove($tp) }
     Update-UcSelectionLabel
 })
 
-$script:btnCertRefresh = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 10 358 150 28 'Left,Top' @{}
+# Quick search row under the grid; filters by Subject, selection always stays visible
+Bind-UcText (Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 357 80 23 'Left,Top' @{}) 'cert.label.search'
+ $script:certSearchBox = Add-UcCtl $tabCert ([System.Windows.Forms.TextBox]) 95 354 400 25 'Left,Top' @{ PlaceholderText = 'part of subject...' }
+ $script:certSearchBox.Add_TextChanged({ Update-UcCertFilter })
+
+ $script:btnCertRefresh = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 10 390 150 28 'Left,Top' @{}
 Bind-UcText $script:btnCertRefresh 'cert.btn.refresh'
 
-$script:btnCertCheckAll = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 170 358 140 28 'Left,Top' @{}
+ $script:btnCertCheckAll = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 170 390 140 28 'Left,Top' @{}
 Bind-UcText $script:btnCertCheckAll 'cert.btn.selectAll'
 
-$script:btnCertUncheckAll = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 320 358 150 28 'Left,Top' @{}
+ $script:btnCertUncheckAll = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 320 390 150 28 'Left,Top' @{}
 Bind-UcText $script:btnCertUncheckAll 'cert.btn.clear'
 
-Bind-UcText (Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 400 190 23 'Left,Top' @{}) 'cert.label.newSubject'
+Bind-UcText (Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 432 190 23 'Left,Top' @{}) 'cert.label.newSubject'
 
-$script:certSubjectBox = Add-UcCtl $tabCert ([System.Windows.Forms.TextBox]) 205 397 300 25 'Left,Top' @{}
+ $script:certSubjectBox = Add-UcCtl $tabCert ([System.Windows.Forms.TextBox]) 205 429 300 25 'Left,Top' @{}
 
-$script:btnNewCert = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 515 396 220 28 'Left,Top' @{}
+ $script:btnNewCert = Add-UcCtl $tabCert ([System.Windows.Forms.Button]) 515 428 220 28 'Left,Top' @{}
 Bind-UcText $script:btnNewCert 'cert.btn.create'
 
-$script:lblCertSelection = Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 434 866 40 'Left,Top,Right' @{ AutoSize = $false; ForeColor = [System.Drawing.Color]::DimGray }
+ $script:lblCertSelection = Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 466 866 40 'Left,Top,Right' @{ AutoSize = $false; ForeColor = [System.Drawing.Color]::DimGray }
 
-Bind-UcText (Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 484 80 23 'Left,Top' @{}) 'language.label'
+Bind-UcText (Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 516 80 23 'Left,Top' @{}) 'language.label'
 
-$script:langCombo = Add-UcCtl $tabCert ([System.Windows.Forms.ComboBox]) 95 481 240 25 'Left,Top' @{ DropDownStyle = 'DropDownList' }
+ $script:langCombo = Add-UcCtl $tabCert ([System.Windows.Forms.ComboBox]) 95 513 240 25 'Left,Top' @{ DropDownStyle = 'DropDownList' }
 
-$script:btnCertRefresh.Add_Click({ Update-UcCertificateList })
-$script:btnCertCheckAll.Add_Click({ foreach ($item in $script:certListView.Items) { $item.Checked = $true } })
-$script:btnCertUncheckAll.Add_Click({ foreach ($item in $script:certListView.Items) { $item.Checked = $false } })
+ $script:btnCertRefresh.Add_Click({ Update-UcCertificateList })
+# Both buttons act on all table rows, including rows hidden by the search filter
+ $script:btnCertCheckAll.Add_Click({ 
+    $dt = $script:certGridView.DataSource -as [System.Data.DataTable]
+    if ($null -eq $dt) { return }
+    foreach ($row in $dt.Rows) {
+        $row['IsChecked'] = $true
+        $null = $script:SelectedThumbprints.Add([string]$row['Thumbprint'])
+    }
+    Update-UcSelectionLabel
+})
+ $script:btnCertUncheckAll.Add_Click({ 
+    $dt = $script:certGridView.DataSource -as [System.Data.DataTable]
+    if ($null -eq $dt) { return }
+    foreach ($row in $dt.Rows) {
+        $row['IsChecked'] = $false
+        $null = $script:SelectedThumbprints.Remove([string]$row['Thumbprint'])
+    }
+    Update-UcSelectionLabel
+})
 
-$script:btnNewCert.Add_Click({
+ $script:btnNewCert.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:certSubjectBox.Text)) { Set-UcStatus (Get-String -Key 'cert.status.needSubject'); return }
     Start-UcOperation 'NewCert' $script:bodies.NewCert @{ InSubject = $script:certSubjectBox.Text }
 })
 
 # --- Tab: String ---
-$tabString = [System.Windows.Forms.TabPage]::new()
-$tabString.Size = [System.Drawing.Size]::new(900, 660)
+ $tabString = [System.Windows.Forms.TabPage]::new()
+ $tabString.Size = [System.Drawing.Size]::new(900, 660)
 Bind-UcText $tabString 'tab.string'
 
-$gb1 = Add-UcCtl $tabString ([System.Windows.Forms.GroupBox]) 10 8 880 300 'Left,Top,Right' @{}
+ $gb1 = Add-UcCtl $tabString ([System.Windows.Forms.GroupBox]) 10 8 880 300 'Left,Top,Right' @{}
 Bind-UcText $gb1 'string.group.protect'
 
 Bind-UcText (Add-UcCtl $gb1 ([System.Windows.Forms.Label]) 14 22 120 23 'Left,Top' @{}) 'label.text'
 
-$script:stringInBox = Add-UcCtl $gb1 ([System.Windows.Forms.TextBox]) 14 45 852 64 'Left,Top,Right' @{ Multiline = $true; ScrollBars = 'Vertical' }
+ $script:stringInBox = Add-UcCtl $gb1 ([System.Windows.Forms.TextBox]) 14 45 852 64 'Left,Top,Right' @{ Multiline = $true; ScrollBars = 'Vertical' }
 
-$script:rdoStringCert = Add-UcCtl $gb1 ([System.Windows.Forms.RadioButton]) 14 116 280 25 'Left,Top' @{ Checked = $true }
+ $script:rdoStringCert = Add-UcCtl $gb1 ([System.Windows.Forms.RadioButton]) 14 116 280 25 'Left,Top' @{ Checked = $true }
 Bind-UcText $script:rdoStringCert 'mode.certificates'
 
-$script:rdoStringPass = Add-UcCtl $gb1 ([System.Windows.Forms.RadioButton]) 300 116 80 25 'Left,Top' @{}
+ $script:rdoStringPass = Add-UcCtl $gb1 ([System.Windows.Forms.RadioButton]) 300 116 80 25 'Left,Top' @{}
 Bind-UcText $script:rdoStringPass 'mode.password'
 
-$script:stringPassBox = Add-UcCtl $gb1 ([System.Windows.Forms.TextBox]) 384 113 150 25 'Left,Top' @{ UseSystemPasswordChar = $true }
+ $script:stringPassBox = Add-UcCtl $gb1 ([System.Windows.Forms.TextBox]) 384 113 150 25 'Left,Top' @{ UseSystemPasswordChar = $true }
 
-$script:chkStringShow = Add-UcCtl $gb1 ([System.Windows.Forms.CheckBox]) 540 114 90 25 'Left,Top' @{}
+ $script:chkStringShow = Add-UcCtl $gb1 ([System.Windows.Forms.CheckBox]) 540 114 90 25 'Left,Top' @{}
 Bind-UcText $script:chkStringShow 'label.show'
 
-$script:btnProtectString = Add-UcCtl $gb1 ([System.Windows.Forms.Button]) 14 146 140 28 'Left,Top' @{}
+ $script:btnProtectString = Add-UcCtl $gb1 ([System.Windows.Forms.Button]) 14 146 140 28 'Left,Top' @{}
 Bind-UcText $script:btnProtectString 'btn.encrypt'
 
-$script:btnCopyProtectOut = Add-UcCtl $gb1 ([System.Windows.Forms.Button]) 162 146 150 28 'Left,Top' @{}
+ $script:btnCopyProtectOut = Add-UcCtl $gb1 ([System.Windows.Forms.Button]) 162 146 150 28 'Left,Top' @{}
 Bind-UcText $script:btnCopyProtectOut 'btn.copyResult'
 
 Bind-UcText (Add-UcCtl $gb1 ([System.Windows.Forms.Label]) 14 184 160 23 'Left,Top' @{}) 'label.resultB64'
 
-$script:stringOutBox = Add-UcCtl $gb1 ([System.Windows.Forms.TextBox]) 14 207 852 80 'Left,Top,Right,Bottom' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
+ $script:stringOutBox = Add-UcCtl $gb1 ([System.Windows.Forms.TextBox]) 14 207 852 80 'Left,Top,Right,Bottom' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
 
-$gb2 = Add-UcCtl $tabString ([System.Windows.Forms.GroupBox]) 10 316 880 268 'Left,Top,Right' @{}
+ $gb2 = Add-UcCtl $tabString ([System.Windows.Forms.GroupBox]) 10 316 880 268 'Left,Top,Right' @{}
 Bind-UcText $gb2 'string.group.unprotect'
 
 Bind-UcText (Add-UcCtl $gb2 ([System.Windows.Forms.Label]) 14 22 120 23 'Left,Top' @{}) 'label.base64'
 
-$script:unprotectInBox = Add-UcCtl $gb2 ([System.Windows.Forms.TextBox]) 14 45 852 64 'Left,Top,Right' @{ Multiline = $true; ScrollBars = 'Vertical' }
+ $script:unprotectInBox = Add-UcCtl $gb2 ([System.Windows.Forms.TextBox]) 14 45 852 64 'Left,Top,Right' @{ Multiline = $true; ScrollBars = 'Vertical' }
 
 Bind-UcText (Add-UcCtl $gb2 ([System.Windows.Forms.Label]) 14 120 150 23 'Left,Top' @{}) 'label.passwordIf'
 
-$script:stringUnprotectPassBox = Add-UcCtl $gb2 ([System.Windows.Forms.TextBox]) 170 117 200 25 'Left,Top' @{ UseSystemPasswordChar = $true }
+ $script:stringUnprotectPassBox = Add-UcCtl $gb2 ([System.Windows.Forms.TextBox]) 170 117 200 25 'Left,Top' @{ UseSystemPasswordChar = $true }
 
-$script:btnUnprotectString = Add-UcCtl $gb2 ([System.Windows.Forms.Button]) 14 146 140 28 'Left,Top' @{}
+ $script:btnUnprotectString = Add-UcCtl $gb2 ([System.Windows.Forms.Button]) 14 146 140 28 'Left,Top' @{}
 Bind-UcText $script:btnUnprotectString 'btn.decrypt'
 
-$script:btnPasteUnprotectIn = Add-UcCtl $gb2 ([System.Windows.Forms.Button]) 162 146 170 28 'Left,Top' @{}
+ $script:btnPasteUnprotectIn = Add-UcCtl $gb2 ([System.Windows.Forms.Button]) 162 146 170 28 'Left,Top' @{}
 Bind-UcText $script:btnPasteUnprotectIn 'btn.paste'
 
-$script:btnCopyUnprotectOut = Add-UcCtl $gb2 ([System.Windows.Forms.Button]) 340 146 150 28 'Left,Top' @{}
+ $script:btnCopyUnprotectOut = Add-UcCtl $gb2 ([System.Windows.Forms.Button]) 340 146 150 28 'Left,Top' @{}
 Bind-UcText $script:btnCopyUnprotectOut 'btn.copyResult'
 
 Bind-UcText (Add-UcCtl $gb2 ([System.Windows.Forms.Label]) 14 184 160 23 'Left,Top' @{}) 'label.result'
 
-$script:unprotectOutBox = Add-UcCtl $gb2 ([System.Windows.Forms.TextBox]) 14 207 852 55 'Left,Top,Right,Bottom' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
+ $script:unprotectOutBox = Add-UcCtl $gb2 ([System.Windows.Forms.TextBox]) 14 207 852 55 'Left,Top,Right,Bottom' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
 
-$script:chkStringShow.Add_CheckedChanged({ $script:stringPassBox.UseSystemPasswordChar = -not $script:chkStringShow.Checked })
+ $script:chkStringShow.Add_CheckedChanged({ $script:stringPassBox.UseSystemPasswordChar = -not $script:chkStringShow.Checked })
 
-$script:btnProtectString.Add_Click({
+ $script:btnProtectString.Add_Click({
     $mode = if ($script:rdoStringPass.Checked) { 'Password' } else { 'Cert' }
     if ([string]::IsNullOrWhiteSpace($script:stringInBox.Text)) { Set-UcStatus (Get-String -Key 'string.status.needText'); return }
     if ($mode -eq 'Password' -and [string]::IsNullOrEmpty($script:stringPassBox.Text)) { Set-UcStatus (Get-String -Key 'status.needPassword'); return }
@@ -610,68 +729,68 @@ $script:btnProtectString.Add_Click({
     }
 })
 
-$script:btnCopyProtectOut.Add_Click({ Copy-UcText $script:stringOutBox.Text })
+ $script:btnCopyProtectOut.Add_Click({ Copy-UcText $script:stringOutBox.Text })
 
-$script:btnUnprotectString.Add_Click({
+ $script:btnUnprotectString.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:unprotectInBox.Text)) { Set-UcStatus (Get-String -Key 'string.status.needBase64'); return }
     Start-UcOperation 'UnprotectString' $script:bodies.UnprotectString @{ InText = $script:unprotectInBox.Text.Trim(); InPassword = $script:stringUnprotectPassBox.Text }
 })
 
-$script:btnPasteUnprotectIn.Add_Click({ try { $script:unprotectInBox.Text = [System.Windows.Forms.Clipboard]::GetText() } catch { Set-UcStatus (Get-String -Key 'status.clipboardFail' -Params @($_.Exception.Message)) } })
+ $script:btnPasteUnprotectIn.Add_Click({ try { $script:unprotectInBox.Text = [System.Windows.Forms.Clipboard]::GetText() } catch { Set-UcStatus (Get-String -Key 'status.clipboardFail' -Params @($_.Exception.Message)) } })
 
-$script:btnCopyUnprotectOut.Add_Click({ Copy-UcText $script:unprotectOutBox.Text })
+ $script:btnCopyUnprotectOut.Add_Click({ Copy-UcText $script:unprotectOutBox.Text })
 
 # --- Tab: File ---
-$tabFile = [System.Windows.Forms.TabPage]::new()
-$tabFile.Size = [System.Drawing.Size]::new(900, 660)
+ $tabFile = [System.Windows.Forms.TabPage]::new()
+ $tabFile.Size = [System.Drawing.Size]::new(900, 660)
 Bind-UcText $tabFile 'tab.file'
 
-$gbF = Add-UcCtl $tabFile ([System.Windows.Forms.GroupBox]) 10 8 880 310 'Left,Top,Right' @{}
+ $gbF = Add-UcCtl $tabFile ([System.Windows.Forms.GroupBox]) 10 8 880 310 'Left,Top,Right' @{}
 Bind-UcText $gbF 'file.group'
 
 Bind-UcText (Add-UcCtl $gbF ([System.Windows.Forms.Label]) 14 22 200 23 'Left,Top' @{}) 'label.srcFile'
 
-$script:filePathBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
+ $script:filePathBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbF 826 44 $script:filePathBox 'File' 'dlg.selectFile' 'All files (*.*)|*.*'
 
 Bind-UcText (Add-UcCtl $gbF ([System.Windows.Forms.Label]) 14 79 380 23 'Left,Top' @{}) 'label.destFolderFile'
 
-$script:fileDestBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
+ $script:fileDestBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbF 826 101 $script:fileDestBox 'Folder' 'dlg.selectFolder' ''
 
-$script:chkFileOverwrite = Add-UcCtl $gbF ([System.Windows.Forms.CheckBox]) 14 134 320 25 'Left,Top' @{}
+ $script:chkFileOverwrite = Add-UcCtl $gbF ([System.Windows.Forms.CheckBox]) 14 134 320 25 'Left,Top' @{}
 Bind-UcText $script:chkFileOverwrite 'chk.overwrite'
 
-$script:rdoFileCert = Add-UcCtl $gbF ([System.Windows.Forms.RadioButton]) 14 162 280 25 'Left,Top' @{ Checked = $true }
+ $script:rdoFileCert = Add-UcCtl $gbF ([System.Windows.Forms.RadioButton]) 14 162 280 25 'Left,Top' @{ Checked = $true }
 Bind-UcText $script:rdoFileCert 'mode.certificates'
 
-$script:rdoFilePass = Add-UcCtl $gbF ([System.Windows.Forms.RadioButton]) 300 162 80 25 'Left,Top' @{}
+ $script:rdoFilePass = Add-UcCtl $gbF ([System.Windows.Forms.RadioButton]) 300 162 80 25 'Left,Top' @{}
 Bind-UcText $script:rdoFilePass 'mode.password'
 
-$script:filePassBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 384 159 150 25 'Left,Top' @{ UseSystemPasswordChar = $true }
+ $script:filePassBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 384 159 150 25 'Left,Top' @{ UseSystemPasswordChar = $true }
 
-$script:chkFileShow = Add-UcCtl $gbF ([System.Windows.Forms.CheckBox]) 540 160 90 25 'Left,Top' @{}
+ $script:chkFileShow = Add-UcCtl $gbF ([System.Windows.Forms.CheckBox]) 540 160 90 25 'Left,Top' @{}
 Bind-UcText $script:chkFileShow 'label.show'
 
-$script:btnProtectFile = Add-UcCtl $gbF ([System.Windows.Forms.Button]) 14 190 140 28 'Left,Top' @{}
+ $script:btnProtectFile = Add-UcCtl $gbF ([System.Windows.Forms.Button]) 14 190 140 28 'Left,Top' @{}
 Bind-UcText $script:btnProtectFile 'btn.encrypt'
 
-$script:btnUnprotectFile = Add-UcCtl $gbF ([System.Windows.Forms.Button]) 162 190 140 28 'Left,Top' @{}
+ $script:btnUnprotectFile = Add-UcCtl $gbF ([System.Windows.Forms.Button]) 162 190 140 28 'Left,Top' @{}
 Bind-UcText $script:btnUnprotectFile 'btn.decrypt'
 
 Bind-UcText (Add-UcCtl $gbF ([System.Windows.Forms.Label]) 14 228 160 23 'Left,Top' @{}) 'label.result'
 
-$script:fileResultBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 14 251 690 44 'Left,Top,Right' @{ Multiline = $true; ReadOnly = $true }
+ $script:fileResultBox = Add-UcCtl $gbF ([System.Windows.Forms.TextBox]) 14 251 690 44 'Left,Top,Right' @{ Multiline = $true; ReadOnly = $true }
 
-$script:btnOpenFileFolder = Add-UcCtl $gbF ([System.Windows.Forms.Button]) 714 250 152 28 'Top,Right' @{}
+ $script:btnOpenFileFolder = Add-UcCtl $gbF ([System.Windows.Forms.Button]) 714 250 152 28 'Top,Right' @{}
 Bind-UcText $script:btnOpenFileFolder 'btn.openFolder'
 
-$script:chkFileShow.Add_CheckedChanged({ $script:filePassBox.UseSystemPasswordChar = -not $script:chkFileShow.Checked })
+ $script:chkFileShow.Add_CheckedChanged({ $script:filePassBox.UseSystemPasswordChar = -not $script:chkFileShow.Checked })
 
 Enable-UcDrop $script:filePathBox
 Enable-UcDrop $script:fileDestBox
 
-$script:btnProtectFile.Add_Click({
+ $script:btnProtectFile.Add_Click({
     $mode = if ($script:rdoFilePass.Checked) { 'Password' } else { 'Cert' }
     if ([string]::IsNullOrWhiteSpace($script:filePathBox.Text)) { Set-UcStatus (Get-String -Key 'file.status.needSrc'); return }
     if ($mode -eq 'Password' -and [string]::IsNullOrEmpty($script:filePassBox.Text)) { Set-UcStatus (Get-String -Key 'status.needPassword'); return }
@@ -681,7 +800,7 @@ $script:btnProtectFile.Add_Click({
     }
 })
 
-$script:btnUnprotectFile.Add_Click({
+ $script:btnUnprotectFile.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:filePathBox.Text)) { Set-UcStatus (Get-String -Key 'file.status.needSrc'); return }
     Start-UcOperation 'UnprotectFile' $script:bodies.UnprotectFile @{
         InPath = $script:filePathBox.Text; InDestination = $script:fileDestBox.Text; InOverwrite = [bool]$script:chkFileOverwrite.Checked
@@ -689,62 +808,62 @@ $script:btnUnprotectFile.Add_Click({
     }
 })
 
-$script:btnOpenFileFolder.Add_Click({
+ $script:btnOpenFileFolder.Add_Click({
     $p = $script:fileResultBox.Text
     if ($p -and (Test-Path -LiteralPath $p)) { Start-Process explorer.exe -ArgumentList "/select,`"$p`"" } else { Set-UcStatus (Get-String -Key 'status.noResultToOpen') }
 })
 
 # --- Tab: Folder ---
-$tabFolder = [System.Windows.Forms.TabPage]::new()
-$tabFolder.Size = [System.Drawing.Size]::new(900, 660)
+ $tabFolder = [System.Windows.Forms.TabPage]::new()
+ $tabFolder.Size = [System.Drawing.Size]::new(900, 660)
 Bind-UcText $tabFolder 'tab.folder'
 
-$gbFo = Add-UcCtl $tabFolder ([System.Windows.Forms.GroupBox]) 10 8 880 340 'Left,Top,Right' @{}
+ $gbFo = Add-UcCtl $tabFolder ([System.Windows.Forms.GroupBox]) 10 8 880 340 'Left,Top,Right' @{}
 Bind-UcText $gbFo 'folder.group'
 
 Bind-UcText (Add-UcCtl $gbFo ([System.Windows.Forms.Label]) 14 22 200 23 'Left,Top' @{}) 'label.srcFolder'
 
-$script:folderPathBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
+ $script:folderPathBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbFo 826 44 $script:folderPathBox 'Folder' 'dlg.selectFolder' ''
 
 Bind-UcText (Add-UcCtl $gbFo ([System.Windows.Forms.Label]) 14 79 380 23 'Left,Top' @{}) 'label.destFolderEmpty'
 
-$script:folderDestBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
+ $script:folderDestBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbFo 826 101 $script:folderDestBox 'Folder' 'dlg.selectFolder' ''
 
-$script:chkFolderRecurse = Add-UcCtl $gbFo ([System.Windows.Forms.CheckBox]) 14 134 260 25 'Left,Top' @{}
+ $script:chkFolderRecurse = Add-UcCtl $gbFo ([System.Windows.Forms.CheckBox]) 14 134 260 25 'Left,Top' @{}
 Bind-UcText $script:chkFolderRecurse 'chk.recurse'
 
-$script:chkFolderOverwrite = Add-UcCtl $gbFo ([System.Windows.Forms.CheckBox]) 300 134 320 25 'Left,Top' @{}
+ $script:chkFolderOverwrite = Add-UcCtl $gbFo ([System.Windows.Forms.CheckBox]) 300 134 320 25 'Left,Top' @{}
 Bind-UcText $script:chkFolderOverwrite 'chk.overwrite'
 
-$script:rdoFolderCert = Add-UcCtl $gbFo ([System.Windows.Forms.RadioButton]) 14 162 280 25 'Left,Top' @{ Checked = $true }
+ $script:rdoFolderCert = Add-UcCtl $gbFo ([System.Windows.Forms.RadioButton]) 14 162 280 25 'Left,Top' @{ Checked = $true }
 Bind-UcText $script:rdoFolderCert 'mode.certificates'
 
-$script:rdoFolderPass = Add-UcCtl $gbFo ([System.Windows.Forms.RadioButton]) 300 162 80 25 'Left,Top' @{}
+ $script:rdoFolderPass = Add-UcCtl $gbFo ([System.Windows.Forms.RadioButton]) 300 162 80 25 'Left,Top' @{}
 Bind-UcText $script:rdoFolderPass 'mode.password'
 
-$script:folderPassBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 384 159 150 25 'Left,Top' @{ UseSystemPasswordChar = $true }
+ $script:folderPassBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 384 159 150 25 'Left,Top' @{ UseSystemPasswordChar = $true }
 
-$script:chkFolderShow = Add-UcCtl $gbFo ([System.Windows.Forms.CheckBox]) 540 160 90 25 'Left,Top' @{}
+ $script:chkFolderShow = Add-UcCtl $gbFo ([System.Windows.Forms.CheckBox]) 540 160 90 25 'Left,Top' @{}
 Bind-UcText $script:chkFolderShow 'label.show'
 
-$script:btnProtectFolder = Add-UcCtl $gbFo ([System.Windows.Forms.Button]) 14 190 170 28 'Left,Top' @{}
+ $script:btnProtectFolder = Add-UcCtl $gbFo ([System.Windows.Forms.Button]) 14 190 170 28 'Left,Top' @{}
 Bind-UcText $script:btnProtectFolder 'btn.encryptFolder'
 
-$script:btnUnprotectFolder = Add-UcCtl $gbFo ([System.Windows.Forms.Button]) 192 190 170 28 'Left,Top' @{}
+ $script:btnUnprotectFolder = Add-UcCtl $gbFo ([System.Windows.Forms.Button]) 192 190 170 28 'Left,Top' @{}
 Bind-UcText $script:btnUnprotectFolder 'btn.decryptFolder'
 
 Bind-UcText (Add-UcCtl $gbFo ([System.Windows.Forms.Label]) 14 228 160 23 'Left,Top' @{}) 'label.summary'
 
-$script:folderResultBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 14 251 852 76 'Left,Top,Right,Bottom' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
+ $script:folderResultBox = Add-UcCtl $gbFo ([System.Windows.Forms.TextBox]) 14 251 852 76 'Left,Top,Right,Bottom' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
 
-$script:chkFolderShow.Add_CheckedChanged({ $script:folderPassBox.UseSystemPasswordChar = -not $script:chkFolderShow.Checked })
+ $script:chkFolderShow.Add_CheckedChanged({ $script:folderPassBox.UseSystemPasswordChar = -not $script:chkFolderShow.Checked })
 
 Enable-UcDrop $script:folderPathBox
 Enable-UcDrop $script:folderDestBox
 
-$script:btnProtectFolder.Add_Click({
+ $script:btnProtectFolder.Add_Click({
     $mode = if ($script:rdoFolderPass.Checked) { 'Password' } else { 'Cert' }
     if ([string]::IsNullOrWhiteSpace($script:folderPathBox.Text)) { Set-UcStatus (Get-String -Key 'folder.status.needSrc'); return }
     if ($mode -eq 'Password' -and [string]::IsNullOrEmpty($script:folderPassBox.Text)) { Set-UcStatus (Get-String -Key 'status.needPassword'); return }
@@ -754,7 +873,7 @@ $script:btnProtectFolder.Add_Click({
     }
 })
 
-$script:btnUnprotectFolder.Add_Click({
+ $script:btnUnprotectFolder.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:folderPathBox.Text)) { Set-UcStatus (Get-String -Key 'folder.status.needSrc'); return }
     Start-UcOperation 'UnprotectFolder' $script:bodies.UnprotectFolder @{
         InFolder = $script:folderPathBox.Text; InDestination = $script:folderDestBox.Text; InRecurse = [bool]$script:chkFolderRecurse.Checked
@@ -763,91 +882,91 @@ $script:btnUnprotectFolder.Add_Click({
 })
 
 # --- Tab: Archive ---
-$tabArc = [System.Windows.Forms.TabPage]::new()
-$tabArc.Size = [System.Drawing.Size]::new(900, 660)
+ $tabArc = [System.Windows.Forms.TabPage]::new()
+ $tabArc.Size = [System.Drawing.Size]::new(900, 660)
 Bind-UcText $tabArc 'tab.archive'
 
-$gbA1 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 8 880 220 'Left,Top,Right' @{}
+ $gbA1 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 8 880 220 'Left,Top,Right' @{}
 Bind-UcText $gbA1 'archive.group.create'
 
 Bind-UcText (Add-UcCtl $gbA1 ([System.Windows.Forms.Label]) 14 22 200 23 'Left,Top' @{}) 'label.srcFolder'
 
-$script:arcFolderBox = Add-UcCtl $gbA1 ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
+ $script:arcFolderBox = Add-UcCtl $gbA1 ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbA1 826 44 $script:arcFolderBox 'Folder' 'dlg.selectFolder' ''
 
 Bind-UcText (Add-UcCtl $gbA1 ([System.Windows.Forms.Label]) 14 79 200 23 'Left,Top' @{}) 'label.archiveFile'
 
-$script:arcDestBox = Add-UcCtl $gbA1 ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
+ $script:arcDestBox = Add-UcCtl $gbA1 ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbA1 826 101 $script:arcDestBox 'Save' 'dlg.selectArchiveSave' '7z archive (*.7z)|*.7z|All files (*.*)|*.*'
 
 Bind-UcText (Add-UcCtl $gbA1 ([System.Windows.Forms.Label]) 14 136 110 23 'Left,Top' @{}) 'label.compressionLevel'
 
-$script:comboLevel = Add-UcCtl $gbA1 ([System.Windows.Forms.ComboBox]) 130 133 130 25 'Left,Top' @{ DropDownStyle = 'DropDownList' }
-$null = $script:comboLevel.Items.AddRange(@('None', 'Fast', 'Normal', 'High', 'Ultra'))
-$script:comboLevel.SelectedIndex = 2
+ $script:comboLevel = Add-UcCtl $gbA1 ([System.Windows.Forms.ComboBox]) 130 133 130 25 'Left,Top' @{ DropDownStyle = 'DropDownList' }
+ $null = $script:comboLevel.Items.AddRange(@('None', 'Fast', 'Normal', 'High', 'Ultra'))
+ $script:comboLevel.SelectedIndex = 2
 
-$script:chkArcOnlyBit = Add-UcCtl $gbA1 ([System.Windows.Forms.CheckBox]) 275 135 260 25 'Left,Top' @{}
+ $script:chkArcOnlyBit = Add-UcCtl $gbA1 ([System.Windows.Forms.CheckBox]) 275 135 260 25 'Left,Top' @{}
 Bind-UcText $script:chkArcOnlyBit 'chk.onlyArchiveBit'
 
-$script:chkArcClearBit = Add-UcCtl $gbA1 ([System.Windows.Forms.CheckBox]) 545 135 250 25 'Left,Top' @{}
+ $script:chkArcClearBit = Add-UcCtl $gbA1 ([System.Windows.Forms.CheckBox]) 545 135 250 25 'Left,Top' @{}
 Bind-UcText $script:chkArcClearBit 'chk.clearArchiveBit'
 
-$script:btnCompress = Add-UcCtl $gbA1 ([System.Windows.Forms.Button]) 14 168 150 28 'Left,Top' @{}
+ $script:btnCompress = Add-UcCtl $gbA1 ([System.Windows.Forms.Button]) 14 168 150 28 'Left,Top' @{}
 Bind-UcText $script:btnCompress 'btn.createArchive'
 
 Bind-UcText (Add-UcCtl $gbA1 ([System.Windows.Forms.Label]) 14 196 852 20 'Left,Top' @{ AutoSize = $false; ForeColor = [System.Drawing.Color]::DimGray }) 'archive.hint'
 
-$gbA2 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 236 880 150 'Left,Top,Right' @{}
+ $gbA2 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 236 880 150 'Left,Top,Right' @{}
 Bind-UcText $gbA2 'archive.group.extract'
 
 Bind-UcText (Add-UcCtl $gbA2 ([System.Windows.Forms.Label]) 14 22 120 23 'Left,Top' @{}) 'label.archive'
 
-$script:arcPathBox = Add-UcCtl $gbA2 ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
+ $script:arcPathBox = Add-UcCtl $gbA2 ([System.Windows.Forms.TextBox]) 14 45 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbA2 826 44 $script:arcPathBox 'File' 'dlg.selectArchiveOpen' '7z archive (*.7z)|*.7z|All files (*.*)|*.*'
 
 Bind-UcText (Add-UcCtl $gbA2 ([System.Windows.Forms.Label]) 14 79 200 23 'Left,Top' @{}) 'label.destFolder'
 
-$script:arcExtractBox = Add-UcCtl $gbA2 ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
+ $script:arcExtractBox = Add-UcCtl $gbA2 ([System.Windows.Forms.TextBox]) 14 102 796 25 'Left,Top,Right' @{}
 Add-UcBrowse $gbA2 826 101 $script:arcExtractBox 'Folder' 'dlg.selectFolder' ''
 
-$script:chkArcOverwrite = Add-UcCtl $gbA2 ([System.Windows.Forms.CheckBox]) 14 134 300 25 'Left,Top' @{}
+ $script:chkArcOverwrite = Add-UcCtl $gbA2 ([System.Windows.Forms.CheckBox]) 14 134 300 25 'Left,Top' @{}
 Bind-UcText $script:chkArcOverwrite 'chk.overwrite'
 
-$script:btnExtract = Add-UcCtl $gbA2 ([System.Windows.Forms.Button]) 330 133 150 28 'Left,Top' @{}
+ $script:btnExtract = Add-UcCtl $gbA2 ([System.Windows.Forms.Button]) 330 133 150 28 'Left,Top' @{}
 Bind-UcText $script:btnExtract 'btn.extract'
 
-$script:btnArcContent = Add-UcCtl $gbA2 ([System.Windows.Forms.Button]) 490 133 140 28 'Left,Top' @{}
+ $script:btnArcContent = Add-UcCtl $gbA2 ([System.Windows.Forms.Button]) 490 133 140 28 'Left,Top' @{}
 Bind-UcText $script:btnArcContent 'btn.content'
 
-$gbA3 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 394 880 160 'Left,Top,Right' @{}
+ $gbA3 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 394 880 160 'Left,Top,Right' @{}
 Bind-UcText $gbA3 'archive.group.tools'
 
 Bind-UcText (Add-UcCtl $gbA3 ([System.Windows.Forms.Label]) 14 24 120 23 'Left,Top' @{}) 'label.archivePassword'
 
-$script:arcPasswordBox = Add-UcCtl $gbA3 ([System.Windows.Forms.TextBox]) 140 21 230 25 'Left,Top' @{ ReadOnly = $true; UseSystemPasswordChar = $true }
+ $script:arcPasswordBox = Add-UcCtl $gbA3 ([System.Windows.Forms.TextBox]) 140 21 230 25 'Left,Top' @{ ReadOnly = $true; UseSystemPasswordChar = $true }
 
-$script:btnArcPassword = Add-UcCtl $gbA3 ([System.Windows.Forms.Button]) 380 20 150 27 'Left,Top' @{}
+ $script:btnArcPassword = Add-UcCtl $gbA3 ([System.Windows.Forms.Button]) 380 20 150 27 'Left,Top' @{}
 Bind-UcText $script:btnArcPassword 'btn.showPassword'
 
-$script:chkArcShowPass = Add-UcCtl $gbA3 ([System.Windows.Forms.CheckBox]) 540 21 90 25 'Left,Top' @{}
+ $script:chkArcShowPass = Add-UcCtl $gbA3 ([System.Windows.Forms.CheckBox]) 540 21 90 25 'Left,Top' @{}
 Bind-UcText $script:chkArcShowPass 'label.show'
 
-$script:archiveListView = Add-UcCtl $gbA3 ([System.Windows.Forms.ListView]) 14 54 852 94 'Left,Top,Right' @{ View = 'Details'; FullRowSelect = $true; GridLines = $true }
-$null = $script:archiveListView.Columns.Add('N', 400)
-$null = $script:archiveListView.Columns.Add('S', 120)
-$null = $script:archiveListView.Columns.Add('M', 150)
-$null = $script:archiveListView.Columns.Add('T', 100)
+ $script:archiveListView = Add-UcCtl $gbA3 ([System.Windows.Forms.ListView]) 14 54 852 94 'Left,Top,Right' @{ View = 'Details'; FullRowSelect = $true; GridLines = $true }
+ $null = $script:archiveListView.Columns.Add('N', 400)
+ $null = $script:archiveListView.Columns.Add('S', 120)
+ $null = $script:archiveListView.Columns.Add('M', 150)
+ $null = $script:archiveListView.Columns.Add('T', 100)
 Bind-UcText $script:archiveListView.Columns[0] 'archive.column.name'
 Bind-UcText $script:archiveListView.Columns[1] 'archive.column.size'
 Bind-UcText $script:archiveListView.Columns[2] 'archive.column.modified'
 Bind-UcText $script:archiveListView.Columns[3] 'archive.column.type'
 
-$script:chkArcShowPass.Add_CheckedChanged({ $script:arcPasswordBox.UseSystemPasswordChar = -not $script:chkArcShowPass.Checked })
+ $script:chkArcShowPass.Add_CheckedChanged({ $script:arcPasswordBox.UseSystemPasswordChar = -not $script:chkArcShowPass.Checked })
 
 Enable-UcDrop $script:arcFolderBox
 Enable-UcDrop $script:arcPathBox
 
-$script:btnCompress.Add_Click({
+ $script:btnCompress.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:arcFolderBox.Text)) { Set-UcStatus (Get-String -Key 'archive.status.needFolder'); return }
     if ([string]::IsNullOrWhiteSpace($script:arcDestBox.Text)) { Set-UcStatus (Get-String -Key 'archive.status.needArchive'); return }
     Start-UcOperation 'Compress' $script:bodies.Compress @{
@@ -857,57 +976,57 @@ $script:btnCompress.Add_Click({
     }
 })
 
-$script:btnExtract.Add_Click({
+ $script:btnExtract.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:arcPathBox.Text)) { Set-UcStatus (Get-String -Key 'archive.status.needArchive'); return }
     Start-UcOperation 'Expand' $script:bodies.Expand @{
         InArchive = $script:arcPathBox.Text; InDestination = $script:arcExtractBox.Text; InOverwrite = [bool]$script:chkArcOverwrite.Checked
     }
 })
 
-$script:btnArcContent.Add_Click({
+ $script:btnArcContent.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:arcPathBox.Text)) { Set-UcStatus (Get-String -Key 'archive.status.needArchive'); return }
     Start-UcOperation 'ArchiveContent' $script:bodies.ArchiveContent @{ InArchive = $script:arcPathBox.Text }
 })
 
-$script:btnArcPassword.Add_Click({
+ $script:btnArcPassword.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:arcPathBox.Text)) { Set-UcStatus (Get-String -Key 'archive.status.needArchive'); return }
     Start-UcOperation 'ArchivePassword' $script:bodies.ArchivePassword @{ InArchive = $script:arcPathBox.Text }
 })
 
 # --- Tab: Container info ---
-$tabInfo = [System.Windows.Forms.TabPage]::new()
-$tabInfo.Size = [System.Drawing.Size]::new(900, 660)
+ $tabInfo = [System.Windows.Forms.TabPage]::new()
+ $tabInfo.Size = [System.Drawing.Size]::new(900, 660)
 Bind-UcText $tabInfo 'tab.container'
 
 Bind-UcText (Add-UcCtl $tabInfo ([System.Windows.Forms.Label]) 10 12 260 23 'Left,Top' @{}) 'container.label.path'
 
-$script:infoPathBox = Add-UcCtl $tabInfo ([System.Windows.Forms.TextBox]) 10 35 816 25 'Left,Top,Right' @{}
+ $script:infoPathBox = Add-UcCtl $tabInfo ([System.Windows.Forms.TextBox]) 10 35 816 25 'Left,Top,Right' @{}
 Add-UcBrowse $tabInfo 836 34 $script:infoPathBox 'File' 'dlg.selectContainer' 'Containers (*.AESPKI)|*.AESPKI|All files (*.*)|*.*'
 
-$script:btnGetInfo = Add-UcCtl $tabInfo ([System.Windows.Forms.Button]) 10 68 150 28 'Left,Top' @{}
+ $script:btnGetInfo = Add-UcCtl $tabInfo ([System.Windows.Forms.Button]) 10 68 150 28 'Left,Top' @{}
 Bind-UcText $script:btnGetInfo 'container.btn.info'
 
-$script:infoTextBox = Add-UcCtl $tabInfo ([System.Windows.Forms.TextBox]) 10 104 876 150 'Left,Top,Right' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
+ $script:infoTextBox = Add-UcCtl $tabInfo ([System.Windows.Forms.TextBox]) 10 104 876 150 'Left,Top,Right' @{ Multiline = $true; ScrollBars = 'Vertical'; ReadOnly = $true }
 
 Bind-UcText (Add-UcCtl $tabInfo ([System.Windows.Forms.Label]) 10 262 400 23 'Left,Top' @{}) 'container.label.recipients'
 
-$script:infoListView = Add-UcCtl $tabInfo ([System.Windows.Forms.ListView]) 10 285 876 220 'Left,Top,Right' @{ View = 'Details'; FullRowSelect = $true; GridLines = $true }
-$null = $script:infoListView.Columns.Add('K', 300)
-$null = $script:infoListView.Columns.Add('C', 540)
+ $script:infoListView = Add-UcCtl $tabInfo ([System.Windows.Forms.ListView]) 10 285 876 220 'Left,Top,Right' @{ View = 'Details'; FullRowSelect = $true; GridLines = $true }
+ $null = $script:infoListView.Columns.Add('K', 300)
+ $null = $script:infoListView.Columns.Add('C', 540)
 Bind-UcText $script:infoListView.Columns[0] 'cert.column.thumbprint'
 Bind-UcText $script:infoListView.Columns[1] 'container.label.recipients'
 
-$script:btnCopyInfo = Add-UcCtl $tabInfo ([System.Windows.Forms.Button]) 10 512 180 28 'Left,Top' @{}
+ $script:btnCopyInfo = Add-UcCtl $tabInfo ([System.Windows.Forms.Button]) 10 512 180 28 'Left,Top' @{}
 Bind-UcText $script:btnCopyInfo 'container.btn.copyReport'
 
 Enable-UcDrop $script:infoPathBox
 
-$script:btnGetInfo.Add_Click({
+ $script:btnGetInfo.Add_Click({
     if ([string]::IsNullOrWhiteSpace($script:infoPathBox.Text)) { Set-UcStatus (Get-String -Key 'container.status.needPath'); return }
     Start-UcOperation 'FileInfo' $script:bodies.FileInfo @{ InPath = $script:infoPathBox.Text }
 })
 
-$script:btnCopyInfo.Add_Click({
+ $script:btnCopyInfo.Add_Click({
     $rec = @($script:infoListView.Items | ForEach-Object { "  $($_.SubItems[0].Text)  ->  $($_.SubItems[1].Text)" })
     Copy-UcText ($script:infoTextBox.Text + [Environment]::NewLine + (Get-String -Key 'container.report.recipients') + [Environment]::NewLine + ($rec -join [Environment]::NewLine))
 })
@@ -915,28 +1034,28 @@ $script:btnCopyInfo.Add_Click({
 # Assemble, language selector, poll timer, run
 foreach ($t in @($tabCert, $tabString, $tabFile, $tabFolder, $tabArc, $tabInfo)) { $null = $script:mainTabControl.TabPages.Add($t) }
 
-$script:statusStrip = [System.Windows.Forms.StatusStrip]::new()
-$script:statusLabel = [System.Windows.Forms.ToolStripStatusLabel]::new()
-$script:statusLabel.Text = ''; $script:statusLabel.Spring = $true; $script:statusLabel.TextAlign = 'MiddleLeft'
-$script:progressBar = [System.Windows.Forms.ToolStripProgressBar]::new()
-$script:progressBar.Size = [System.Drawing.Size]::new(220, 16)
-$null = $script:statusStrip.Items.Add($script:statusLabel)
-$null = $script:statusStrip.Items.Add($script:progressBar)
-$script:mainForm.Controls.Add($script:statusStrip)
+ $script:statusStrip = [System.Windows.Forms.StatusStrip]::new()
+ $script:statusLabel = [System.Windows.Forms.ToolStripStatusLabel]::new()
+ $script:statusLabel.Text = ''; $script:statusLabel.Spring = $true; $script:statusLabel.TextAlign = 'MiddleLeft'
+ $script:progressBar = [System.Windows.Forms.ToolStripProgressBar]::new()
+ $script:progressBar.Size = [System.Drawing.Size]::new(220, 16)
+ $null = $script:statusStrip.Items.Add($script:statusLabel)
+ $null = $script:statusStrip.Items.Add($script:progressBar)
+ $script:mainForm.Controls.Add($script:statusStrip)
 
 Apply-UcLocalization
 Update-UcCertificateList
 
 # Language selector: plain Items + parallel code list (no WinForms data binding to PS objects)
-$script:langCodes = [System.Collections.Generic.List[string]]::new()
-$langs = Get-LanguageList
+ $script:langCodes = [System.Collections.Generic.List[string]]::new()
+ $langs = Get-LanguageList
 foreach ($entry in ($langs.GetEnumerator() | Sort-Object Value)) {
     $null = $script:langCombo.Items.Add([string]$entry.Value)
     $script:langCodes.Add([string]$entry.Key)
     if ($entry.Key -eq (Get-CurrentLanguage)) { $script:langCombo.SelectedIndex = $script:langCombo.Items.Count - 1 }
 }
 
-$script:langCombo.Add_SelectedIndexChanged({
+ $script:langCombo.Add_SelectedIndexChanged({
     if ($this.SelectedIndex -lt 0) { return }
     $code = $script:langCodes[$this.SelectedIndex]
     if ($code -ne (Get-CurrentLanguage)) {
@@ -946,9 +1065,9 @@ $script:langCombo.Add_SelectedIndexChanged({
     }
 })
 
-$script:pollTimer = [System.Windows.Forms.Timer]::new()
-$script:pollTimer.Interval = 200
-$script:pollTimer.Add_Tick({
+ $script:pollTimer = [System.Windows.Forms.Timer]::new()
+ $script:pollTimer.Interval = 200
+ $script:pollTimer.Add_Tick({
     for ($i = $script:jobs.Count - 1; $i -ge 0; $i--) {
         $job = $script:jobs[$i]
         if (-not $job.Handle.IsCompleted) { continue }
@@ -968,16 +1087,19 @@ $script:pollTimer.Add_Tick({
     }
 })
 
-$script:pollTimer.Start()
+ $script:pollTimer.Start()
 
-$script:mainForm.Add_FormClosing({ param($s, $e)
+ $script:mainForm.Add_FormClosing({ param($s, $e)
     if ($script:sync.State -eq 'Running') {
         $answer = [System.Windows.Forms.MessageBox]::Show($s, (Get-String -Key 'dialog.closeConfirm'), (Get-String -Key 'dialog.title'), 'YesNo', 'Warning')
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { $e.Cancel = $true; return }
     }
     $script:pollTimer.Stop()
+    # Stop and dispose pending background runspaces so no orphaned worker writes into $script:sync
+    foreach ($job in $script:jobs) { try { $job.PS.Stop() } catch { }; $job.PS.Dispose() }
+    $script:jobs.Clear()
 })
 
 Set-UcStatus (Get-String -Key 'status.readyHint')
 [void]$script:mainForm.ShowDialog()
-$script:mainForm.Dispose()
+ $script:mainForm.Dispose()

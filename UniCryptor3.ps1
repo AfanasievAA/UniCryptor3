@@ -23,11 +23,12 @@ UniCryptor3.ps1
       plus utilities for inspecting container information.
 
 .NOTES
-  Version:        0.3
+  Version:        0.4
   Author:         Andrew Afanasiev
   Date:           08.09.2026
   Contacts:       AfanasievAA@yandex.ru
   Changes:
+    • Few params
     • Bugfixes, formatting
 
 .EXAMPLE
