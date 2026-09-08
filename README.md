@@ -1,6 +1,6 @@
 # UniCryptor3 PowerShell Module  
 
-**Hybrid certificate‑ and password‑based encryption toolkit for PowerShell**  
+**Hybrid certificate and passwordbased encryption toolkit for PowerShell**  
 
 ---  
 
@@ -16,7 +16,7 @@
   - [Protect / Unprotect a file (certificate mode)](#protect--unprotect-a-file-certificate-mode)  
   - [Protect / Unprotect a file (password mode)](#protect--unprotect-a-file-password-mode)  
   - [Encrypt / Decrypt a folder](#encrypt--decrypt-a-folder)  
-  - [Create an encrypted 7‑zip archive](#create-an-encrypted-7‑zip-archive)  
+  - [Create an encrypted 7zip archive](#create-an-encrypted-7zip-archive)  
   - [Inspect container information](#inspect-container-information)  
 - [Available Cmdlets / Functions](#available-cmdlets--functions)  
 - [Configuration Options](#configuration-options)  
@@ -29,16 +29,16 @@
 
 ## Overview  
 
-`UniCryptor3` is a pure‑PowerShell implementation of a modern encryption container format.  
+`UniCryptor3` is a purePowerShell implementation of a modern encryption container format.  
 It supports:
 
-* **AES‑256‑GCM** chunked encryption (1 MiB chunks, per‑chunk 16‑byte authentication tag).  
-* **Key transport** via RSA‑OAEP‑SHA256 (multiple X.509 certificate recipients) **or** PBKDF2‑HMAC‑SHA256 derived keys (password mode).  
+* **AES256GCM** chunked encryption (1 MiB chunks, perchunk 16byte authentication tag).  
+* **Key transport** via RSAOAEPSHA256 (multiple X.509 certificate recipients) **or** PBKDF2HMACSHA256 derived keys (password mode).  
 * Transparent **metadata encryption** (original file length, timestamps).  
-* Seamless protection of **strings, files, folders** and **7‑zip archives**.  
+* Seamless protection of **strings, files, folders** and **7zip archives**.  
 * Automatic progress reporting, overwrite handling and timestamp restoration.  
 
-The public API is exposed through a set of easy‑to‑use PowerShell functions prefixed with `UC`.  
+The public API is exposed through a set of easytouse PowerShell functions prefixed with `UC`.  
 All heavy lifting is done by the `UniCryptor3` .NET class defined in the script.  
 
 ---  
@@ -49,19 +49,19 @@ All heavy lifting is done by the `UniCryptor3` .NET class defined in the script.
 |---------|-------------|
 | **Chunked AEAD** | Handles files of any size; each chunk is authenticated separately. |
 | **Certificate mode** | Wraps a random AES key with one or more RSA public keys; recipients only need the matching private key to decrypt. |
-| **Password mode** | Derives an AES key from a password using PBKDF2‑HMAC‑SHA256 (default ≥ 300 k iterations). |
+| **Password mode** | Derives an AES key from a password using PBKDF2HMACSHA256 (default ≥ 300 k iterations). |
 | **Metadata block** | Stores original length and UTC timestamps inside the first plaintext chunk (optional). |
-| **7‑zip integration** | Uses SevenZipSharp (`7z64.dll`) to compress folders, then encrypts the archive password in a UniCryptor container appended to the 7‑z file. |
+| **7zip integration** | Uses SevenZipSharp (`7z64.dll`) to compress folders, then encrypts the archive password in a UniCryptor container appended to the 7z file. |
 | **Progress events** | Cmdlets display a live progress bar when the `$Options.ShowProgress` flag is `$true`. |
-| **Self‑signed cert helper** | `New-UCSelfSignedCertificate` creates a suitable RSA certificate for testing. |
-| **Cross‑platform** | Requires PowerShell 7.5+; works on Windows, macOS and Linux (provided the native 7‑z DLL is present). |
+| **Selfsigned cert helper** | `New-UCSelfSignedCertificate` creates a suitable RSA certificate for testing. |
+| **Crossplatform** | Requires PowerShell 7.5+; works on Windows, macOS and Linux (provided the native 7z DLL is present). |
 
 ---  
 
 ## Prerequisites  
 
 * PowerShell **7.5** or later (`#requires -Version 7.5`).  
-* .NET 6+ runtime (bundled with PowerShell 7).  
+* .NET 6+ runtime (bundled with PowerShell 7).  
 * **SevenZipSharp** library (`SevenZipSharp.dll` + `7z64.dll`) located in `bin\7Zip4PowerShell` relative to the script.  
 * For certificate mode: at least one X.509 certificate with an RSA public key in the **CurrentUser\My** or **CurrentUser\AddressBook** store.  
 
@@ -69,12 +69,9 @@ All heavy lifting is done by the `UniCryptor3` .NET class defined in the script.
 
 ## Installation  
 
-### 1. Clone the repository  
+### 1. Installation
 
-```bash
-git clone https://github.com/your‑account/UniCryptor3.git
-cd UniCryptor3
-```
+* Code -> Download ZIP -> Expand to any folder -> **Run GUI**
 
 ### 2. Import the module  
 
@@ -88,7 +85,7 @@ Copy-Item -Recurse -Force . $modulePath
 Import-Module UniCryptor3
 ```
 
-### 3. Verify that the 7‑z DLL is found  
+### 3. Verify that the 7z DLL is found  
 
 ```powershell
 $dll = Join-Path $PSScriptRoot 'bin\7Zip4PowerShell\7z64.dll'
@@ -121,7 +118,7 @@ $protected = Protect-UCString -PlainText 'My password is 1234'
 $clear     = Unprotect-UCString -ProtectedText $protected
 
 # Password mode
-$protectedPwd = Protect-UCString -PlainText 'Top‑secret' -Password 'P@ssw0rd!'
+$protectedPwd = Protect-UCString -PlainText 'Topsecret' -Password 'P@ssw0rd!'
 $clearPwd     = Unprotect-UCString -ProtectedText $protectedPwd -Password 'P@ssw0rd!'
 ```
 
@@ -190,7 +187,7 @@ $summary = Unprotect-UCFile `
 
 ---
 
-### Create an encrypted 7‑zip archive  
+### Create an encrypted 7zip archive  
 
 ```powershell
 # Use existing certificates or let the cmdlet pick them automatically
@@ -235,17 +232,17 @@ $info | Format-List
 
 | Cmdlet | Description |
 |--------|-------------|
-| `Protect-UCString` | Encrypt a plain‑text string (certificate or password mode). |
+| `Protect-UCString` | Encrypt a plaintext string (certificate or password mode). |
 | `Unprotect-UCString` | Decrypt a string produced by `Protect-UCString`. |
 | `Protect-UCFile` | Encrypt a file, folder or recursive tree. Supports certificate or password mode. |
 | `Unprotect-UCFile` | Decrypt a previously encrypted file/folder. |
 | `Get-UCFileInfo` | Show container metadata without needing a private key. |
-| `Compress-UCArchive` | Create an encrypted 7‑zip archive from a folder. |
-| `Expand-UCArchive` | Decrypt and extract an encrypted 7‑zip archive. |
-| `Get-UCArchivePassword` | Retrieve the password used to encrypt a 7‑zip archive (requires private key). |
+| `Compress-UCArchive` | Create an encrypted 7zip archive from a folder. |
+| `Expand-UCArchive` | Decrypt and extract an encrypted 7zip archive. |
+| `Get-UCArchivePassword` | Retrieve the password used to encrypt a 7zip archive (requires private key). |
 | `Get-UCArchiveContent` | List files inside an encrypted archive (no extraction). |
 | `Get-UCCertificates` | Helper to enumerate usable certificates from the current user store. |
-| `New-UCSelfSignedCertificate` | Generate a self‑signed RSA certificate suitable for UniCryptor3. |
+| `New-UCSelfSignedCertificate` | Generate a selfsigned RSA certificate suitable for UniCryptor3. |
 
 All functions accept the standard `-WhatIf` / `-Confirm` switches where applicable.  
 
@@ -257,22 +254,22 @@ The `UniCryptor3` class exposes an `$Options` object that can be tuned before ru
 
 ```powershell
 $uc = [UniCryptor3]::new()
-$uc.Options.ShowProgress          = $true   # display Write‑Progress bars
-$uc.Options.CompressionLevel      = 'High'  # for 7‑z archives only
-$uc.Options.EncryptHeaders        = $true   # encrypt 7‑z file headers
+$uc.Options.ShowProgress          = $true   # display WriteProgress bars
+$uc.Options.CompressionLevel      = 'High'  # for 7z archives only
+$uc.Options.EncryptHeaders        = $true   # encrypt 7z file headers
 $uc.Options.OnlyFilesWithArchiveBit = $false # limit compression to files with the Archive attribute
 $uc.Options.ClearArchiveBit       = $false  # clear the Archive attribute after compression
 ```
 
-When using the high‑level cmdlets, you can set these options via parameters (`-CompressionLevel`, `-OnlyFilesWithArchiveBit`, `-ClearArchiveBit`).  
+When using the highlevel cmdlets, you can set these options via parameters (`-CompressionLevel`, `-OnlyFilesWithArchiveBit`, `-ClearArchiveBit`).  
 
 ---  
 
 ## Error Handling & Logging  
 
-* **Exceptions** – All low‑level errors are thrown as .NET exceptions (`System.IO.IOException`, `System.Security.Cryptography.CryptographicException`, etc.).  
+* **Exceptions** – All lowlevel errors are thrown as .NET exceptions (`System.IO.IOException`, `System.Security.Cryptography.CryptographicException`, etc.).  
 * **Verbose output** – Use `-Verbose` with any cmdlet to see detailed progress messages.  
-* **Progress** – Controlled by `$uc.Options.ShowProgress` (default `$true`).  
+* **Progress** – Controlled by `$uc.Options.ShowProgress` (default `$true`).  
 
 Typical error scenarios:
 
@@ -282,20 +279,6 @@ Typical error scenarios:
 | Destination file already exists and `-Overwrite` not specified | `IOException: Output file '…' already exists` |
 | No suitable certificates found | `InvalidOperationException: No encryption certificates configured` |
 | Archive password cannot be retrieved | `FileNotFoundException` or `CryptographicException` depending on the cause. |
-
----  
-
-## Contributing  
-
-Contributions are welcome! Please follow these steps:
-
-1. Fork the repository.  
-2. Create a feature branch (`git checkout -b feature/my‑new‑feature`).  
-3. Add your changes, ensuring **ASCII‑only** documentation and comments.  
-4. Run the built‑in PowerShell script linting (`Invoke-ScriptAnalyzer`) and unit tests (if any).  
-5. Submit a Pull Request with a clear description of the change.  
-
-All contributions must be compatible with the MIT license (see below).  
 
 ---  
 
