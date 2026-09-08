@@ -1,4 +1,5 @@
 ﻿<#
+UniCryptor3GUI.ps1
 .SYNOPSIS
   UniCryptor3 GUI - graphical interface for UniCryptor3 encryption toolkit.
 
@@ -324,7 +325,25 @@ function Show-UcFileInfoResult {
 
 # Complete operation based on tag
 function Complete-UcOperation {
-    if ($script:sync.Error) { Set-UcStatus (Get-String -Key 'status.error' -Params @([string]$script:sync.Error)); $script:sync.State = 'Idle'; Update-UcBusyState; return }
+    if ($script:sync.Error) {
+        Set-UcStatus (Get-String -Key 'status.error' -Params @([string]$script:sync.Error))
+        # Clear result fields on error
+        switch ($script:sync.Tag) {
+            'ProtectString' { $script:stringOutBox.Text = '' }
+            'UnprotectString' { $script:unprotectOutBox.Text = '' }
+            'ProtectFile' { $script:fileResultBox.Text = '' }
+            'UnprotectFile' { $script:fileResultBox.Text = '' }
+            'ProtectFolder' { $script:folderResultBox.Text = '' }
+            'UnprotectFolder' { $script:folderResultBox.Text = '' }
+            'Compress' { $script:arcPathBox.Text = '' }
+            'ArchivePassword' { $script:arcPasswordBox.Text = '' }
+            'ArchiveContent' { $script:archiveListView.Items.Clear() }
+            'FileInfo' { $script:infoTextBox.Text = ''; $script:infoListView.Items.Clear() }
+        }
+        $script:sync.State = 'Idle'
+        Update-UcBusyState
+        return
+    }
     switch ($script:sync.Tag) {
         'ProtectString' { $script:stringOutBox.Text = [string]$script:sync.Result; Set-UcStatus (Get-String -Key 'string.status.encrypted') }
         'UnprotectString' { $script:unprotectOutBox.Text = [string]$script:sync.Result; Set-UcStatus (Get-String -Key 'string.status.decrypted') }
@@ -390,35 +409,70 @@ function Copy-UcText { param($Text)
 # Get selected certificates
 function Get-UcSelectedCertificates {
     $list = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
-    foreach ($item in $script:certListView.Items) { if ($item.Checked -and $null -ne $item.Tag) { $list.Add($item.Tag) } }
+    foreach ($item in $script:certListView.Items) {
+        if ($item.Checked -and $null -ne $item.Tag) {
+            $c = $item.Tag
+            # Include all selected certificates, regardless of private key presence
+            $list.Add($c)
+        }
+    }
     return $list.ToArray()
 }
-
 # Update selection label
 function Update-UcSelectionLabel {
     $script:lblCertSelection.Text = Get-String -Key 'cert.selection.label' -Params @($script:SelectedThumbprints.Count)
 }
 
-# Update certificate list view
+# Update certificate list view using DataTable binding
 function Update-UcCertificateList {
+    $certs = @(Get-UCCertificates)
+    # Build DataTable with certificate data
+    $dt = New-Object System.Data.DataTable
+    $null = $dt.Columns.Add('Subject', [string])
+    $null = $dt.Columns.Add('Thumbprint', [string])
+    $null = $dt.Columns.Add('ValidTo', [string])
+    $null = $dt.Columns.Add('HasPrivateKey', [string])
+    $null = $dt.Columns.Add('CertificateObject', [System.Security.Cryptography.X509Certificates.X509Certificate2])
+    $null = $dt.Columns.Add('IsChecked', [bool])
+    
+    $existing = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($c in $certs) {
+        $null = $existing.Add($c.Thumbprint)
+        try {
+            $hasPriv = $null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($c)
+        } catch {
+            $hasPriv = $false
+        }
+        $row = $dt.NewRow()
+        $row.Subject = $c.Subject
+        $row.Thumbprint = $c.Thumbprint
+        $row.ValidTo = $c.NotAfter.ToString('yyyy-MM-dd')
+        $row.HasPrivateKey = if ($hasPriv) { Get-String -Key 'cert.priv.yes' } else { Get-String -Key 'cert.priv.no' }
+        $row.CertificateObject = $c
+        $row.IsChecked = $script:SelectedThumbprints.Contains($c.Thumbprint)
+        $null = $dt.Rows.Add($row)
+    }
+    # Drop thumbprints that no longer exist in the store
+    $null = $script:SelectedThumbprints.RemoveWhere({ param($tp) -not $existing.Contains($tp) })
+    
+    # Set DataSource for the ListView using DataTable binding
     $script:certListView.BeginUpdate()
     try {
         $script:certListView.Items.Clear()
-        $certs = @(Get-UCCertificates)
-        foreach ($c in $certs) {
-            $hasPriv = $null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($c)
-            $item = [System.Windows.Forms.ListViewItem]::new($c.Subject)
-            $null = $item.SubItems.Add($c.Thumbprint)
-            $null = $item.SubItems.Add($c.NotAfter.ToString('yyyy-MM-dd'))
-            $null = $item.SubItems.Add($(if ($hasPriv) { Get-String -Key 'cert.priv.yes' } else { Get-String -Key 'cert.priv.no' }))
-            $item.Tag = $c
-            $item.Checked = $script:SelectedThumbprints.Contains($c.Thumbprint)
+        $script:certListView.View = 'Details'
+        $script:certListView.FullRowSelect = $true
+        $script:certListView.GridLines = $true
+        $script:certListView.CheckBoxes = $true
+        
+        foreach ($row in $dt.Rows) {
+            $item = [System.Windows.Forms.ListViewItem]::new([string]$row.Subject)
+            $null = $item.SubItems.Add([string]$row.Thumbprint)
+            $null = $item.SubItems.Add([string]$row.ValidTo)
+            $null = $item.SubItems.Add([string]$row.HasPrivateKey)
+            $item.Tag = $row.CertificateObject
+            $item.Checked = [bool]$row.IsChecked
             $null = $script:certListView.Items.Add($item)
         }
-        # Drop thumbprints that no longer exist in the store
-        $existing = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($c in $certs) { $null = $existing.Add($c.Thumbprint) }
-        $null = $script:SelectedThumbprints.RemoveWhere({ param($tp) -not $existing.Contains($tp) })
     } finally { $script:certListView.EndUpdate() }
     Update-UcSelectionLabel
 }

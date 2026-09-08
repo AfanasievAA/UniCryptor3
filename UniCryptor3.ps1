@@ -1,5 +1,6 @@
 ﻿#requires -Version 7.5
 <#
+UniCryptor3.ps1
 .SYNOPSIS
   UniCryptor3 – hybrid certificate‑ and password‑based encryption toolkit for PowerShell.
 
@@ -911,21 +912,61 @@ class UniCryptor3 {
 
 # ---------- Module-level functions (thin facade over UniCryptor3) ----------
 
-# Retrieves certificates from the CurrentUser store
+# Retrieves certificates from all available stores (CurrentUser and LocalMachine)
 function Get-UCCertificates {
     [CmdletBinding()]
     param(
         [Parameter()][string[]]$Thumbprint,
         [Parameter()][switch]$RequirePrivateKey
     )
-    $certs = @(Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue)
-    if ($Thumbprint){ $certs += @(Get-ChildItem Cert:\CurrentUser\AddressBook -ErrorAction SilentlyContinue) }
-    $result = @($certs | Where-Object { $null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($_) })
-    if ($RequirePrivateKey){ $result = @($result | Where-Object { $null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($_) }) }
-    if ($Thumbprint){ $result = @($result | Where-Object { $Thumbprint -contains $_.Thumbprint }) }
+    $certs = [System.Collections.Generic.List[System.Security.Cryptography.X509Certificates.X509Certificate2]]::new()
+    $storeNames = @('My', 'AddressBook', 'TrustedPeople', 'CA', 'Disallowed')
+    $storeLocations = @([System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser,
+                         [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+    
+    foreach ($location in $storeLocations) {
+        foreach ($name in $storeNames) {
+            try {
+                $store = [System.Security.Cryptography.X509Certificates.X509Store]::new($name, $location)
+                $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+                foreach ($cert in $store.Certificates) {
+                    # Only include certificates that have a public key (valid certificates)
+                    if ($null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)) {
+                        $certs.Add($cert)
+                    }
+                }
+                $store.Close()
+            } catch {
+                # Skip stores that can't be opened
+            }
+        }
+    }
+    
+    # Remove duplicates by thumbprint (keep first occurrence)
+    $uniqueCerts = [System.Collections.Generic.Dictionary[string, System.Security.Cryptography.X509Certificates.X509Certificate2]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($c in $certs) {
+        if (-not $uniqueCerts.ContainsKey($c.Thumbprint)) {
+            $uniqueCerts[$c.Thumbprint] = $c
+        }
+    }
+    $result = $uniqueCerts.Values
+    
+    if ($RequirePrivateKey) {
+        $result = @($result | Where-Object {
+            try {
+                $null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($_)
+            } catch {
+                $false
+            }
+        })
+    }
+    
+    if ($Thumbprint) {
+        $result = @($result | Where-Object { $Thumbprint -contains $_.Thumbprint })
+    }
+    
     return $result
 }
-
 # Creates a self-signed certificate for encryption purposes
 function New-UCSelfSignedCertificate {
     [CmdletBinding()]
@@ -943,7 +984,10 @@ function Protect-UCString {
     )
     $uc = [UniCryptor3]::new()
     if ($PSCmdlet.ParameterSetName -eq 'Password'){ return $uc.ProtectStringWithPassword($PlainText, $Password) }
-    if (-not $Certificate){ $Certificate = Get-UCCertificates -RequirePrivateKey }
+    # Use exactly the certificates provided, do not fall back to auto-selection
+    if (-not $Certificate -or $Certificate.Count -eq 0) {
+        throw [System.InvalidOperationException]::new('No certificates specified for encryption. Please select certificates in the GUI.')
+    }
     $uc.SetEncryptionCertificates($Certificate)
     return $uc.ProtectString($PlainText)
 }
@@ -975,12 +1019,18 @@ function Protect-UCFile {
         $item = Get-Item -LiteralPath $Path -ErrorAction Stop
         if ($item.PSIsContainer){
             if ($Password){ return $uc.ProtectFolderWithPassword($Path, $Destination, $Password, [bool]$Overwrite, [bool]$Recurse) }
-            if (-not $Certificate){ $Certificate = Get-UCCertificates -RequirePrivateKey }
+            # Use exactly the certificates provided, do not fall back to auto-selection
+            if (-not $Certificate -or $Certificate.Count -eq 0) {
+                throw [System.InvalidOperationException]::new('No certificates specified for encryption. Please select certificates in the GUI.')
+            }
             $uc.SetEncryptionCertificates($Certificate)
             return $uc.ProtectFolder($Path, $Destination, [bool]$Overwrite, [bool]$Recurse)
         }
         if ($Password){ return $uc.ProtectFileWithPassword($Path, $Destination, $Password, [bool]$Overwrite) }
-        if (-not $Certificate){ $Certificate = Get-UCCertificates -RequirePrivateKey }
+        # Use exactly the certificates provided, do not fall back to auto-selection
+        if (-not $Certificate -or $Certificate.Count -eq 0) {
+            throw [System.InvalidOperationException]::new('No certificates specified for encryption. Please select certificates in the GUI.')
+        }
         $uc.SetEncryptionCertificates($Certificate)
         return $uc.ProtectFile($Path, $Destination, [bool]$Overwrite)
     }
@@ -1030,7 +1080,10 @@ function Compress-UCArchive {
     if ($CompressionLevel){ $uc.Options.CompressionLevel = $CompressionLevel }
     $uc.Options.OnlyFilesWithArchiveBit = [bool]$OnlyFilesWithArchiveBit
     $uc.Options.ClearArchiveBit = [bool]$ClearArchiveBit
-    if (-not $Certificate){ $Certificate = Get-UCCertificates -RequirePrivateKey }
+    # Use exactly the certificates provided, do not fall back to auto-selection
+    if (-not $Certificate -or $Certificate.Count -eq 0) {
+        throw [System.InvalidOperationException]::new('No certificates specified for encryption. Please select certificates in the GUI.')
+    }
     $uc.SetEncryptionCertificates($Certificate)
     return $uc.Compress7Zip($Folder, $DestinationPath, [bool]$Overwrite)
 }

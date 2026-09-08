@@ -34,7 +34,7 @@
   "cert.btn.create": "Create self-signed…",
   "cert.status.created": "Certificate created and selected for encryption: $1",
   "cert.status.needSubject": "Specify a Subject for the new certificate",
-  "cert.selection.label": "Selected for encryption: $1. Empty selection — all local certificates with a private key are used.",
+  "cert.selection.label": "Selected for encryption: $1. Empty selection — no certificates selected.",
   "string.group.protect": "Protect a string",
   "string.group.unprotect": "Unprotect a string",
   "label.text": "Text:",
