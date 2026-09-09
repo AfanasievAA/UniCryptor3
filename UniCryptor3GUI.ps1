@@ -89,8 +89,10 @@ if (-not (Test-Path -LiteralPath $script:LocModulePath)) { throw "Localization m
 
 try { Initialize-Localization } catch { throw "Localization init failed: $($_.Exception.Message)" }
 
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
+# Archive dependencies are checked and downloaded by UniCryptor3.ps1 itself; warn if unavailable
+if (-not (Test-UCDependencies)) {
+    [System.Windows.Forms.MessageBox]::Show("Archive dependencies are missing and could not be downloaded. Archive features will be unavailable.", 'UniCryptor3', 'OK', 'Warning') | Out-Null
+}
 
 # ConvertToDataTable function
 function ConvertToDataTable {
@@ -191,7 +193,7 @@ function Start-UcOperation {
     $script:sync.Language = Get-CurrentLanguage
     foreach ($key in $Inputs.Keys) { $script:sync[$key] = $Inputs[$key] }
     $worker = 'param($ctx, $libPath, $locPath)' + "`n" + '$ErrorActionPreference = ''Stop''' + "`n" +
-        '. $libPath' + "`n" + '. $locPath' + "`n" +
+        '. $libPath -SkipDependencyInstall' + "`n" + '. $locPath' + "`n" +
         'Initialize-Localization -LanguageCode $ctx.Language' + "`n" +
         '& {' + "`n" + $Body.ToString() + "`n" + '} $ctx'
     $ps = [powershell]::Create()
@@ -486,9 +488,14 @@ function Get-UcSelectedCertificates {
     }
     return $list.ToArray()
 }
-# Update selection label
+# Update selection label: separate keys for empty and non-empty selection
 function Update-UcSelectionLabel {
-    $script:lblCertSelection.Text = Get-String -Key 'cert.selection.label' -Params @($script:SelectedThumbprints.Count)
+    $count = $script:SelectedThumbprints.Count
+    if ($count -gt 0) {
+        $script:lblCertSelection.Text = Get-String -Key 'cert.selection.selected' -Params @($count)
+    } else {
+        $script:lblCertSelection.Text = Get-String -Key 'cert.selection.none'
+    }
 }
 
 # Update certificate list: build DataTable, bind it, columns are generated automatically
@@ -631,9 +638,6 @@ Bind-UcText $script:btnNewCert 'cert.btn.create'
 
  $script:lblCertSelection = Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 466 866 40 'Left,Top,Right' @{ AutoSize = $false; ForeColor = [System.Drawing.Color]::DimGray }
 
-Bind-UcText (Add-UcCtl $tabCert ([System.Windows.Forms.Label]) 10 516 80 23 'Left,Top' @{}) 'language.label'
-
- $script:langCombo = Add-UcCtl $tabCert ([System.Windows.Forms.ComboBox]) 95 513 240 25 'Left,Top' @{ DropDownStyle = 'DropDownList' }
 
  $script:btnCertRefresh.Add_Click({ Update-UcCertificateList })
 # Both buttons act on all table rows, including rows hidden by the search filter
@@ -916,7 +920,7 @@ Bind-UcText $script:btnCompress 'btn.createArchive'
 
 Bind-UcText (Add-UcCtl $gbA1 ([System.Windows.Forms.Label]) 14 196 852 20 'Left,Top' @{ AutoSize = $false; ForeColor = [System.Drawing.Color]::DimGray }) 'archive.hint'
 
- $gbA2 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 236 880 150 'Left,Top,Right' @{}
+ $gbA2 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 236 880 170 'Left,Top,Right' @{}
 Bind-UcText $gbA2 'archive.group.extract'
 
 Bind-UcText (Add-UcCtl $gbA2 ([System.Windows.Forms.Label]) 14 22 120 23 'Left,Top' @{}) 'label.archive'
@@ -938,7 +942,7 @@ Bind-UcText $script:btnExtract 'btn.extract'
  $script:btnArcContent = Add-UcCtl $gbA2 ([System.Windows.Forms.Button]) 490 133 140 28 'Left,Top' @{}
 Bind-UcText $script:btnArcContent 'btn.content'
 
- $gbA3 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 394 880 160 'Left,Top,Right' @{}
+ $gbA3 = Add-UcCtl $tabArc ([System.Windows.Forms.GroupBox]) 10 414 880 160 'Left,Top,Right' @{}
 Bind-UcText $gbA3 'archive.group.tools'
 
 Bind-UcText (Add-UcCtl $gbA3 ([System.Windows.Forms.Label]) 14 24 120 23 'Left,Top' @{}) 'label.archivePassword'
@@ -1046,7 +1050,9 @@ foreach ($t in @($tabCert, $tabString, $tabFile, $tabFolder, $tabArc, $tabInfo))
 Apply-UcLocalization
 Update-UcCertificateList
 
-# Language selector: plain Items + parallel code list (no WinForms data binding to PS objects)
+# Language selector pinned to the form's top-right corner over the tab strip; plain Items + parallel code list
+ $script:langCombo = Add-UcCtl $script:mainForm ([System.Windows.Forms.ComboBox]) 778 5 114 22 'Top,Right' @{ DropDownStyle = 'DropDownList'; Font = [System.Drawing.Font]::new('Segoe UI', 8) }
+ $script:langCombo.BringToFront()
  $script:langCodes = [System.Collections.Generic.List[string]]::new()
  $langs = Get-LanguageList
 foreach ($entry in ($langs.GetEnumerator() | Sort-Object Value)) {

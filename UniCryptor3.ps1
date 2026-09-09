@@ -23,9 +23,9 @@ UniCryptor3.ps1
       plus utilities for inspecting container information.
 
 .NOTES
-  Version:        0.4
+  Version:        0.5
   Author:         Andrew Afanasiev
-  Date:           08.09.2026
+  Date:           09.09.2026
   Contacts:       AfanasievAA@yandex.ru
   Changes:
     • Few params
@@ -72,9 +72,83 @@ UniCryptor3.ps1
 
 #>
 
-$UCScriptRoot = if ($PSScriptRoot){ $PSScriptRoot }else{ (Get-Location).Path }
-$UC7zFolder = Join-Path $UCScriptRoot 'bin\7Zip4Powershell'
-if (Test-Path -LiteralPath $UC7zFolder){
+# File UniCryptor3.ps1
+[CmdletBinding()]
+param(
+    # Force re-download of dependency libraries even when they are already installed
+    [switch]$UpdateDependencies,
+    # 7Zip4Powershell release to install: 'latest' (default) or a specific release tag like '2.5.0'
+    [string]$DependencyVersion = 'latest',
+    # Offline mode: never download missing dependencies at load time
+    [switch]$SkipDependencyInstall
+)
+
+ $UCScriptRoot = if ($PSScriptRoot){ $PSScriptRoot }else{ (Get-Location).Path }
+ $UC7zFolder = Join-Path $UCScriptRoot 'bin\7Zip4Powershell'
+ $UCDependencyVersion = $DependencyVersion
+
+# ---------- Dependency management: 7Zip4Powershell ----------
+# Distribution channel is the PowerShell Gallery; GitHub releases of this project carry no binary assets
+# Only these files are required; only these are extracted from the package
+ $UCDependencyFiles = @('SevenZipSharp.dll', '7z64.dll')
+
+# True when every required dependency file is present
+function Test-UCDependencies {
+    foreach ($file in $UCDependencyFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $UC7zFolder $file))) { return $false }
+    }
+    return $true
+}
+
+# Downloads the 7Zip4Powershell module package (nupkg is a plain zip) and extracts ONLY the required files.
+# Version 'latest' resolves the newest gallery version; any other value is treated as an exact version
+function Install-UCDependencies {
+    [CmdletBinding()]
+    param([string]$Version = $UCDependencyVersion)
+    # Unversioned gallery URL redirects to the latest published version
+    $url = if ($Version -eq 'latest') { 'https://www.powershellgallery.com/api/v2/package/7Zip4Powershell' }
+           else { 'https://www.powershellgallery.com/api/v2/package/7Zip4Powershell/{0}' -f $Version }
+    $tmpZip = Join-Path ([System.IO.Path]::GetTempPath()) ('uc7z4ps_' + [guid]::NewGuid().ToString('N') + '.zip')
+    try {
+        Write-Host ("Downloading dependencies: 7Zip4Powershell ({0})..." -f $Version)
+        Invoke-WebRequest -Uri $url -OutFile $tmpZip -TimeoutSec 300
+        $null = New-Item -ItemType Directory -Path $UC7zFolder -Force
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($tmpZip)
+        try {
+            # Report the actually delivered version from the package manifest
+            $nuspec = @($zip.Entries | Where-Object { $_.Name -eq '7Zip4Powershell.nuspec' } | Select-Object -First 1)
+            if ($nuspec.Count -ge 1) {
+                $reader = [System.IO.StreamReader]::new($nuspec[0].Open())
+                try { $ver = ([xml]$reader.ReadToEnd()).package.metadata.version } finally { $reader.Dispose() }
+                Write-Host ("  package version: {0}" -f $ver)
+            }
+            foreach ($file in $UCDependencyFiles) {
+                # Pick the entry by file name wherever it sits inside the package
+                $entry = @($zip.Entries | Where-Object { $_.Name -eq $file } | Select-Object -First 1)
+                if ($entry.Count -lt 1) { throw ("File '{0}' not found in the 7Zip4Powershell package" -f $file) }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry[0], (Join-Path $UC7zFolder $file), $true)
+                Write-Host ("  installed: {0}" -f $file)
+            }
+        } finally { $zip.Dispose() }
+    } finally {
+        Remove-Item -LiteralPath $tmpZip -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-UCDependencies)) { throw 'Dependency files are still missing after installation' }
+    Write-Host ("Dependencies ready in {0}" -f $UC7zFolder)
+}
+
+# Startup: install missing dependencies, forced update on demand, then load SevenZipSharp
+if (-not (Test-UCDependencies)) {
+    if ($SkipDependencyInstall) {
+        Write-Warning ("Dependency libraries not found in {0}; archive features are unavailable. Install with: . '{1}' -UpdateDependencies" -f $UC7zFolder, $PSCommandPath)
+    } else {
+        try { Install-UCDependencies } catch { Write-Warning ("Dependency download failed: {0}. Archive features are unavailable." -f $_.Exception.Message) }
+    }
+} elseif ($UpdateDependencies) {
+    try { Install-UCDependencies } catch { Write-Warning ("Dependency update failed: {0}" -f $_.Exception.Message) }
+}
+if (Test-UCDependencies) {
     if (-not ('SevenZip.SevenZipCompressor' -as [type])){
         Add-Type -Path (Join-Path $UC7zFolder 'SevenZipSharp.dll')
         [SevenZip.SevenZipCompressor]::SetLibraryPath((Join-Path $UC7zFolder '7z64.dll'))

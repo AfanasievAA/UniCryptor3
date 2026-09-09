@@ -131,5 +131,7 @@
   "worker.noFilesEncrypt": "No files to encrypt in the source folder",
   "worker.noFilesDecrypt": "No $1 files in the source folder",
   "worker.noCerts": "No certificates selected and no local certificates with a private key found",
-  "cert.label.search": "Search:"
+  "cert.label.search": "Search:",
+  "cert.selection.none": "No certificates selected for encryption",
+  "cert.selection.selected": "Selected for encryption: $1"  
 }

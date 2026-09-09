@@ -131,5 +131,7 @@
   "worker.noFilesEncrypt": "В исходной папке нет файлов для шифрования",
   "worker.noFilesDecrypt": "В исходной папке нет файлов $1",
   "worker.noCerts": "Сертификаты не выбраны и локальных сертификатов с приватным ключом не найдено",
-  "cert.label.search": "Поиск:"
+  "cert.label.search": "Поиск:",
+  "cert.selection.none": "Сертификаты для шифрования не выбраны",
+  "cert.selection.selected": "Выбрано для шифрования: $1"
 }
