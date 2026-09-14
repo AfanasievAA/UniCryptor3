@@ -1,4 +1,5 @@
-﻿<#
+﻿#requires -Version 7.5
+<#
 UniCryptor3GUI.ps1
 .SYNOPSIS
   UniCryptor3 GUI - graphical interface for UniCryptor3 encryption toolkit.
@@ -22,9 +23,9 @@ UniCryptor3GUI.ps1
       with progress indication
 
 .NOTES
-  Version:        0.2
+  Version:        0.4
   Author:         Andrew Afanasiev
-  Date:           08.09.2026
+  Date:           14.09.2026
   Contacts:       AfanasievAA@yandex.ru
   Requirements:   Windows, PowerShell 7.5+
                   UniCryptor3.ps1 in the same directory
@@ -67,6 +68,8 @@ UniCryptor3GUI.ps1
 #>
 
  $ErrorActionPreference = 'Stop'
+# Load UI assemblies explicitly: PS 7 on Windows resolves WinForms implicitly, this covers other hosts and the early dependency warning
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 # WinForms and the clipboard require an STA thread; relaunch under pwsh -STA if needed
 if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA' -and $PSCommandPath) {
     Start-Process pwsh -ArgumentList @('-STA', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $PSCommandPath)
@@ -180,6 +183,7 @@ function Apply-UcLocalization {
 function Update-UcBusyState {
     $busy = ($script:sync.State -eq 'Running')
     $script:mainTabControl.Enabled = -not $busy
+    if ($null -ne $script:langCombo) { $script:langCombo.Enabled = -not $busy }
     $script:progressBar.Style = if ($busy) { 'Marquee' } else { 'Continuous' }
     if (-not $busy) { $script:progressBar.Value = 0 }
 }
@@ -250,15 +254,19 @@ function Start-UcOperation {
             $files = @(Get-ChildItem -LiteralPath $src.FullName -Force -File -Recurse:$ctx.InRecurse | Where-Object { $_.Extension -ne [UniCryptor3]::DefaultExtension })
             if ($files.Count -lt 1) { throw (Get-String -Key 'worker.noFilesEncrypt') }
             $mode = $ctx.InMode
+            # Use exactly the certificates selected in the GUI, no silent fallback to all local private keys
             if ($mode -ne 'Password') {
-                $certs = $ctx.InCerts
-                if ($certs.Count -lt 1) { $certs = @(Get-UCCertificates -RequirePrivateKey) }
+                $certs = @($ctx.InCerts)
                 if ($certs.Count -lt 1) { throw (Get-String -Key 'worker.noCerts') }
                 $uc.SetEncryptionCertificates([System.Security.Cryptography.X509Certificates.X509Certificate2[]]$certs)
             }
+            # Subfolders are flattened: detect output name collisions to prevent silent overwrites
+            $duplicateNames = @{}
+            foreach ($f in $files) { $outName = $f.Name + [UniCryptor3]::DefaultExtension; if ($duplicateNames.ContainsKey($outName)) { $duplicateNames[$outName] = $true } else { $duplicateNames[$outName] = $false } }
             $ok = 0; $failed = [System.Collections.Generic.List[object]]::new(); $i = 0
             foreach ($f in $files) {
                 $i++
+                if ($duplicateNames[($f.Name + [UniCryptor3]::DefaultExtension)]) { $failed.Add([pscustomobject]@{ Path = $f.FullName; Message = 'Output name collides with another file from a subfolder (folder encryption flattens the structure)' }); continue }
                 $ctx.StatusText = "($i/$($files.Count)) $($f.Name)"
                 $ctx.Percent = [int](100 * ($i - 1) / $files.Count)
                 try {
@@ -279,9 +287,13 @@ function Start-UcOperation {
             if (-not $src.PSIsContainer) { throw (Get-String -Key 'worker.notFolder' -Params @($src.FullName)) }
             $files = @(Get-ChildItem -LiteralPath $src.FullName -Force -File -Recurse:$ctx.InRecurse -Filter ('*' + [UniCryptor3]::DefaultExtension))
             if ($files.Count -lt 1) { throw (Get-String -Key 'worker.noFilesDecrypt' -Params @([UniCryptor3]::DefaultExtension)) }
+            # Subfolders are flattened: detect output name collisions to prevent silent overwrites
+            $duplicateNames = @{}
+            foreach ($f in $files) { $outName = $f.BaseName; if ($duplicateNames.ContainsKey($outName)) { $duplicateNames[$outName] = $true } else { $duplicateNames[$outName] = $false } }
             $ok = 0; $failed = [System.Collections.Generic.List[object]]::new(); $i = 0
             foreach ($f in $files) {
                 $i++
+                if ($duplicateNames[$f.BaseName]) { $failed.Add([pscustomobject]@{ Path = $f.FullName; Message = 'Output name collides with another file from a subfolder (folder decryption flattens the structure)' }); continue }
                 $ctx.StatusText = "($i/$($files.Count)) $($f.Name)"
                 $ctx.Percent = [int](100 * ($i - 1) / $files.Count)
                 try {
@@ -917,6 +929,8 @@ Bind-UcText $script:chkArcClearBit 'chk.clearArchiveBit'
 
  $script:btnCompress = Add-UcCtl $gbA1 ([System.Windows.Forms.Button]) 14 168 150 28 'Left,Top' @{}
 Bind-UcText $script:btnCompress 'btn.createArchive'
+ $script:chkArcCreateOverwrite = Add-UcCtl $gbA1 ([System.Windows.Forms.CheckBox]) 170 170 200 25 'Left,Top' @{}
+Bind-UcText $script:chkArcCreateOverwrite 'chk.overwrite'
 
 Bind-UcText (Add-UcCtl $gbA1 ([System.Windows.Forms.Label]) 14 196 852 20 'Left,Top' @{ AutoSize = $false; ForeColor = [System.Drawing.Color]::DimGray }) 'archive.hint'
 
@@ -974,7 +988,7 @@ Enable-UcDrop $script:arcPathBox
     if ([string]::IsNullOrWhiteSpace($script:arcFolderBox.Text)) { Set-UcStatus (Get-String -Key 'archive.status.needFolder'); return }
     if ([string]::IsNullOrWhiteSpace($script:arcDestBox.Text)) { Set-UcStatus (Get-String -Key 'archive.status.needArchive'); return }
     Start-UcOperation 'Compress' $script:bodies.Compress @{
-        InFolder = $script:arcFolderBox.Text; InArchive = $script:arcDestBox.Text; InOverwrite = $true
+        InFolder = $script:arcFolderBox.Text; InArchive = $script:arcDestBox.Text; InOverwrite = [bool]$script:chkArcCreateOverwrite.Checked
         InLevel = [string]$script:comboLevel.SelectedItem; InOnlyBit = [bool]$script:chkArcOnlyBit.Checked
         InClearBit = [bool]$script:chkArcClearBit.Checked; InCerts = @(Get-UcSelectedCertificates)
     }
@@ -1080,7 +1094,10 @@ foreach ($entry in ($langs.GetEnumerator() | Sort-Object Value)) {
         try { $null = $job.PS.EndInvoke($job.Handle) } catch { $script:sync.Error = $_.Exception.GetBaseException().Message }
         finally { $job.PS.Dispose() }
         $script:jobs.RemoveAt($i)
-        if ($script:sync.State -eq 'Running') { Complete-UcOperation }
+        if ($script:sync.State -eq 'Running') {
+            # An exception inside completion must not leave the UI stuck in the Running state
+            try { Complete-UcOperation } catch { $script:sync.State = 'Idle'; Update-UcBusyState; Set-UcStatus (Get-String -Key 'status.error' -Params @([string]$_.Exception.Message)) }
+        }
     }
     if ($script:sync.State -eq 'Running') {
         $status = Get-String -Key 'status.running' -Params @($script:sync.Tag)
@@ -1107,5 +1124,6 @@ foreach ($entry in ($langs.GetEnumerator() | Sort-Object Value)) {
 })
 
 Set-UcStatus (Get-String -Key 'status.readyHint')
+[System.Windows.Forms.Application]::EnableVisualStyles()
 [void]$script:mainForm.ShowDialog()
  $script:mainForm.Dispose()

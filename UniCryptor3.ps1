@@ -23,13 +23,10 @@ UniCryptor3.ps1
       plus utilities for inspecting container information.
 
 .NOTES
-  Version:        0.5
+  Version:        0.6
   Author:         Andrew Afanasiev
-  Date:           09.09.2026
+  Date:           14.09.2026
   Contacts:       AfanasievAA@yandex.ru
-  Changes:
-    • Few params
-    • Bugfixes, formatting
 
 .EXAMPLE
   # Protect a simple string with the default certificate store
@@ -80,11 +77,18 @@ param(
     # 7Zip4Powershell release to install: 'latest' (default) or a specific release tag like '2.5.0'
     [string]$DependencyVersion = 'latest',
     # Offline mode: never download missing dependencies at load time
-    [switch]$SkipDependencyInstall
+    [switch]$SkipDependencyInstall,
+    # Parent folder for the 7Zip4Powershell dependency subfolder (defaults to <script folder>\bin)
+    [string]$DependencyFolderPath = $null
 )
 
- $UCScriptRoot = if ($PSScriptRoot){ $PSScriptRoot }else{ (Get-Location).Path }
- $UC7zFolder = Join-Path $UCScriptRoot 'bin\7Zip4Powershell'
+if ([string]::IsNullOrWhiteSpace($DependencyFolderPath)) {
+    $DependencyFolderPath = if ($PSScriptRoot){ Join-Path $PSScriptRoot "bin" } else { Join-Path ((Get-Location).Path) "bin" }
+}
+# Normalize to an absolute filesystem path: .NET calls (zip extraction, native 7z library load) resolve relative paths against the process working directory, not the PowerShell location
+ $DependencyFolderPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DependencyFolderPath)
+
+ $UC7zFolder = $global:UC7zFolder = Join-Path $DependencyFolderPath '7Zip4Powershell'
  $UCDependencyVersion = $DependencyVersion
 
 # ---------- Dependency management: 7Zip4Powershell ----------
@@ -141,7 +145,7 @@ function Install-UCDependencies {
 # Startup: install missing dependencies, forced update on demand, then load SevenZipSharp
 if (-not (Test-UCDependencies)) {
     if ($SkipDependencyInstall) {
-        Write-Warning ("Dependency libraries not found in {0}; archive features are unavailable. Install with: . '{1}' -UpdateDependencies" -f $UC7zFolder, $PSCommandPath)
+        Write-Warning ("Dependency libraries not found in {0}; archive features are unavailable. Install with: . '{1}' -UpdateDependencies -DependencyFolderPath '{2}'" -f $UC7zFolder, $PSCommandPath, $DependencyFolderPath)
     } else {
         try { Install-UCDependencies } catch { Write-Warning ("Dependency download failed: {0}. Archive features are unavailable." -f $_.Exception.Message) }
     }
@@ -149,7 +153,8 @@ if (-not (Test-UCDependencies)) {
     try { Install-UCDependencies } catch { Write-Warning ("Dependency update failed: {0}" -f $_.Exception.Message) }
 }
 if (Test-UCDependencies) {
-    if (-not ('SevenZip.SevenZipCompressor' -as [type])){
+    if (-not ([Environment]::Is64BitProcess)){ Write-Warning 'The bundled 7z64.dll requires a 64-bit PowerShell process; archive features are unavailable' }
+    elseif (-not ('SevenZip.SevenZipCompressor' -as [type])){
         Add-Type -Path (Join-Path $UC7zFolder 'SevenZipSharp.dll')
         [SevenZip.SevenZipCompressor]::SetLibraryPath((Join-Path $UC7zFolder '7z64.dll'))
     }
@@ -227,6 +232,7 @@ function New-UCSevenZipCompressor {
 # Creates a new SevenZipExtractor instance for the given archive and password
 function New-UCSevenZipExtractor {
     param([string]$ArchivePath, [string]$Password)
+    if (-not ('SevenZip.SevenZipExtractor' -as [type])){ throw [System.InvalidOperationException]::new(("SevenZipSharp library is not loaded: check the dependency folder '{0}'" -f $global:UC7zFolder)) }
     return [SevenZip.SevenZipExtractor]::new($ArchivePath, $Password)
 }
 
@@ -421,15 +427,15 @@ class UCEnvelope {
         $byKeyId = @{}
         foreach ($recipient in $recipients){ $byKeyId[$recipient.KeyId] = $recipient }
         foreach ($cert in $CandidateCertificates){
+            if (-not $cert.HasPrivateKey){ continue }
+            $entry = $byKeyId[([BitConverter]::ToString([UCEnvelope]::GetKeyId($cert))).Replace('-','')]
+            if ($null -eq $entry){ continue }
             $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
             if ($null -eq $rsa){ continue }
             try {
-                $entry = $byKeyId[([BitConverter]::ToString([UCEnvelope]::GetKeyId($cert))).Replace('-','')]
-                if ($null -ne $entry){
-                    $key = $rsa.Decrypt($entry.WrappedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
-                    if ($key.Length -eq 32){ return $key }
-                    [Array]::Clear($key, 0, $key.Length)
-                }
+                $key = $rsa.Decrypt($entry.WrappedKey, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+                if ($key.Length -eq 32){ return $key }
+                [Array]::Clear($key, 0, $key.Length)
             } catch {
                 Write-Verbose "Failed to unwrap the key with certificate $($cert.Thumbprint): $($_.Exception.Message)"
             } finally { $rsa.Dispose() }
@@ -519,7 +525,7 @@ class UniCryptor3 {
 
     # Retrieves certificates with private keys from the CurrentUser\My store
     hidden [object] GetLocalPrivateCertificates() {
-        return @(Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Where-Object { $null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($_) })
+        return @(Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Where-Object { $_.HasPrivateKey })
     }
 
     # Prepares the destination folder, creating it if necessary
@@ -545,7 +551,9 @@ class UniCryptor3 {
         $chunkIndex = [UInt32]0
         $firstPlain = [byte[]]::new([UCFormat]::ChunkSize)
         if ($metaLength -gt 0){ [Array]::Copy($MetaBytes, $firstPlain, $metaLength) }
-        $firstRead = $PlainStream.Read($firstPlain, $metaLength, [UCFormat]::ChunkSize - $metaLength)
+        # Stream.Read may return fewer bytes than requested: fill the buffer to keep chunk geometry valid
+        $firstRead = 0
+        while ($firstRead -lt [UCFormat]::ChunkSize - $metaLength){ $n = $PlainStream.Read($firstPlain, $metaLength + $firstRead, [UCFormat]::ChunkSize - $metaLength - $firstRead); if ($n -le 0){ break }; $firstRead += $n }
         $firstPlainLength = $metaLength + $firstRead
         if ($firstPlainLength -gt 0){
             $chunk = Invoke-UCGcmEncrypt $Key ([UCFormat]::NonceFor($nonceBase, 0)) $firstPlain $firstPlainLength ([UCFormat]::BuildAad($header, 0))
@@ -553,7 +561,11 @@ class UniCryptor3 {
             $chunkIndex = [UInt32]1
         }
         $buffer = [byte[]]::new([UCFormat]::ChunkSize)
-        while (($read = $PlainStream.Read($buffer, 0, [UCFormat]::ChunkSize)) -gt 0){
+        # Stream.Read may return fewer bytes than requested: fill the buffer to keep chunk geometry valid
+        while ($true){
+            $read = 0
+            while ($read -lt [UCFormat]::ChunkSize){ $n = $PlainStream.Read($buffer, $read, [UCFormat]::ChunkSize - $read); if ($n -le 0){ break }; $read += $n }
+            if ($read -le 0){ break }
             $chunk = Invoke-UCGcmEncrypt $Key ([UCFormat]::NonceFor($nonceBase, $chunkIndex)) $buffer $read ([UCFormat]::BuildAad($header, $chunkIndex))
             $OutputStream.Write($chunk, 0, $chunk.Length)
             $chunkIndex++
@@ -575,8 +587,8 @@ class UniCryptor3 {
         $InputStream.Seek($footerStart, [System.IO.SeekOrigin]::Begin) | Out-Null
         $footerBytes = [byte[]]::new([int]$footerLength)
         if ($InputStream.Read($footerBytes, 0, [int]$footerLength) -ne [int]$footerLength){ throw [System.FormatException]::new('Unexpected end of stream') }
-        $envelopeLength = [int][BitConverter]::ToUInt32($footerBytes, 0)
-        if ($envelopeLength -lt 8 -or (24 + $envelopeLength) -ne [int]$footerLength){ throw [System.FormatException]::new('Invalid envelope length: container is corrupt') }
+        $envelopeLength = [UInt32][BitConverter]::ToUInt32($footerBytes, 0)
+        if ($envelopeLength -lt 8 -or $envelopeLength -gt 1048576 -or (24 + $envelopeLength) -ne [int]$footerLength){ throw [System.FormatException]::new('Invalid envelope length: container is corrupt') }
         $crcInput = [byte[]]::new(4 + $envelopeLength + 8)
         [Array]::Copy($footerBytes, $crcInput, $crcInput.Length)
         $crc = [UCFormat]::Slice([System.Security.Cryptography.SHA256]::HashData($crcInput), 0, 8)
@@ -660,6 +672,8 @@ class UniCryptor3 {
             $passwordEnvelope = [UCEnvelope]::ParsePasswordEnvelope($Info.Envelope)
             return [UCEnvelope]::DeriveKeyFromPassword($Password, $passwordEnvelope.Salt, $passwordEnvelope.Iterations)
         }
+        if (-not [string]::IsNullOrEmpty($Password)){ Write-Warning 'A password was supplied but the container is certificate-based: the password is ignored' }
+        if ($null -eq $CandidateCertificates){ $CandidateCertificates = $this.GetLocalPrivateCertificates() }
         $key = [UCEnvelope]::UnwrapKey($Info.Envelope, $CandidateCertificates)
         if ($null -eq $key){ throw [System.Security.Cryptography.CryptographicException]::new('No matching private key found for any recipient of this container') }
         return $key
@@ -704,7 +718,7 @@ class UniCryptor3 {
         $inStream = [System.IO.MemoryStream]::new($container)
         try {
             $info = $this.ReadContainerInfo($inStream)
-            $key = $this.ResolveKey($info, $Password, $this.GetLocalPrivateCertificates())
+            $key = $this.ResolveKey($info, $Password, $null)
             try {
                 $plain = $this.DecryptContainerToMemory($inStream, $key, $info)
                 return [System.Text.Encoding]::UTF8.GetString($plain)
@@ -738,6 +752,10 @@ class UniCryptor3 {
                 try { $this.WriteContainer($reader, $writer, $key, $envelope, $flags, $metaBytes) }
                 finally { $writer.Dispose() }
             } finally { $reader.Dispose() }
+        } catch {
+            # Remove the partially written container so no corrupt output is left behind
+            Remove-Item -LiteralPath $outputFullFileName -ErrorAction SilentlyContinue
+            throw
         } finally { if ($null -ne $key){ [Array]::Clear($key, 0, $key.Length) } }
         return $outputFullFileName
     }
@@ -752,6 +770,7 @@ class UniCryptor3 {
 
     # Encrypts a file using a password
     [string] ProtectFileWithPassword([string]$Path, [string]$Destination, [string]$Password, [bool]$Overwrite) {
+        if ([string]::IsNullOrEmpty($Password)){ throw [System.ArgumentException]::new('Password must not be empty') }
         $inputFile = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
         if ($null -eq $inputFile){ throw [System.IO.FileNotFoundException]::new("File '$Path' not found") }
         if ($inputFile.PSIsContainer){ throw [System.ArgumentException]::new("'$Path' is a folder: use ProtectFolderWithPassword") }
@@ -767,7 +786,7 @@ class UniCryptor3 {
         $reader = [System.IO.FileStream]::new($InputFile.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, [UCFormat]::ChunkSize)
         try {
             $info = $this.ReadContainerInfo($reader)
-            $key = $this.ResolveKey($info, $Password, $this.GetLocalPrivateCertificates())
+            $key = $this.ResolveKey($info, $Password, $null)
             try {
                 $result = $this.DecryptContainerToPath($reader, $outputFullFileName, $key, $info)
                 if ($null -ne $result.Metadata){
@@ -804,12 +823,16 @@ class UniCryptor3 {
         if ($null -eq $srcFolder -or -not $srcFolder.PSIsContainer){ throw [System.ArgumentException]::new("Source folder '$FolderName' does not exist or is not a folder") }
         $files = @(Get-ChildItem -LiteralPath $srcFolder.FullName -Force -File -Recurse:$Recurse | Where-Object { $_.Extension -ne [UniCryptor3]::DefaultExtension })
         if ([string]::IsNullOrEmpty($Password)){ $this.AssertCertificates() }
+        # Folder encryption flattens subfolders: detect output name collisions to prevent silent overwrites
+        $duplicateNames = @{}
+        foreach ($file in $files){ $outName = $file.Name + [UniCryptor3]::DefaultExtension; if ($duplicateNames.ContainsKey($outName)){ $duplicateNames[$outName] = $true }else{ $duplicateNames[$outName] = $false } }
         $succeeded = [System.Collections.Generic.List[string]]::new()
         $failed = [System.Collections.Generic.List[object]]::new()
         $counter = 0
         foreach ($file in $files){
             $counter++
             if ($this.Options.ShowProgress){ Write-Progress -Activity "Encrypting files in '$FolderName'" -Status $file.Name -PercentComplete ([int](100 * $counter / $files.Count)) }
+            if ($duplicateNames[($file.Name + [UniCryptor3]::DefaultExtension)]){ $failed.Add([PSCustomObject]@{ Path = $file.FullName; Message = 'Output name collides with another file from a subfolder (folder encryption flattens the structure)' }); continue }
             try { $succeeded.Add($this.ProtectFileInternal($file, $Destination, $Overwrite, $Password)) }
             catch { $failed.Add([PSCustomObject]@{ Path = $file.FullName; Message = $_.Exception.Message }) }
         }
@@ -821,7 +844,7 @@ class UniCryptor3 {
     [object] ProtectFolder([string]$FolderName, [string]$Destination, [bool]$Overwrite, [bool]$Recurse) { return $this.ProtectFolderInternal($FolderName, $Destination, $Overwrite, $Recurse, $null) }
 
     # Encrypts a folder using a password
-    [object] ProtectFolderWithPassword([string]$FolderName, [string]$Destination, [string]$Password, [bool]$Overwrite, [bool]$Recurse) { return $this.ProtectFolderInternal($FolderName, $Destination, $Overwrite, $Recurse, $Password) }
+    [object] ProtectFolderWithPassword([string]$FolderName, [string]$Destination, [string]$Password, [bool]$Overwrite, [bool]$Recurse) { if ([string]::IsNullOrEmpty($Password)){ throw [System.ArgumentException]::new('Password must not be empty') }; return $this.ProtectFolderInternal($FolderName, $Destination, $Overwrite, $Recurse, $Password) }
 
     # Decrypts a folder (certificate or password-based)
     [object] UnprotectFolder([string]$FolderName, [string]$Destination, [bool]$Overwrite, [bool]$Recurse, [string]$Password) {
@@ -873,7 +896,7 @@ class UniCryptor3 {
 
     # Gets or creates a SevenZipCompressor instance
     hidden [object] GetSevenZipCompressor() {
-        if (-not ('SevenZip.SevenZipCompressor' -as [type])){ throw [System.InvalidOperationException]::new('SevenZipSharp library is not loaded: check the bin\7Zip4Powershell folder next to the script') }
+        if (-not ('SevenZip.SevenZipCompressor' -as [type])){ throw [System.InvalidOperationException]::new(("SevenZipSharp library is not loaded: check the dependency folder '{0}'" -f $global:UC7zFolder)) }
         if ($null -eq $this.Compressor){ $this.Compressor = New-UCSevenZipCompressor $this.Options }
         else { $this.Compressor.CompressionLevel = $this.Options.CompressionLevel; $this.Compressor.EncryptHeaders = $this.Options.EncryptHeaders }
         return $this.Compressor
@@ -910,12 +933,6 @@ class UniCryptor3 {
                 $async = $compressorObj.CompressFilesEncryptedAsync($Destination, $password, [string[]]($files2Compress.FullName))
                 $this.WaitForAsyncOperation($async, "Compressing to $Destination")
             } finally { Unregister-Event -SourceIdentifier 'UniCryptor3_7zCompress' -ErrorAction SilentlyContinue }
-            if ($this.Options.ClearArchiveBit){
-                $archAttr = [System.IO.FileAttributes]::Archive
-                $cleared = 0
-                foreach ($file in $files2Compress){ if (($file.Attributes -band $archAttr) -ne 0){ $file.Attributes = $file.Attributes -bxor $archAttr; $cleared++ } }
-                Write-Verbose "Archive attribute cleared on $cleared files"
-            }
             $archive = Get-Item -LiteralPath $Destination -ErrorAction SilentlyContinue
             if ($null -eq $archive){ throw [System.InvalidOperationException]::new("Compression did not produce the expected archive '$Destination'") }
             $key = [UCRandom]::NewKey()
@@ -930,6 +947,13 @@ class UniCryptor3 {
                     } finally { $writer.Dispose() }
                 } finally { $plainStream.Dispose() }
             } finally { [Array]::Clear($key, 0, $key.Length) }
+            # Clear the archive bit only after the archive and its key container were written successfully
+            if ($this.Options.ClearArchiveBit){
+                $archAttr = [System.IO.FileAttributes]::Archive
+                $cleared = 0
+                foreach ($file in $files2Compress){ if (($file.Attributes -band $archAttr) -ne 0){ try { $file.Attributes = $file.Attributes -bxor $archAttr; $cleared++ } catch { Write-Warning "Failed to clear the archive attribute on '$($file.FullName)': $($_.Exception.Message)" } } }
+                Write-Verbose "Archive attribute cleared on $cleared files"
+            }
             return $Destination
         } catch {
             Remove-Item -LiteralPath $Destination -ErrorAction SilentlyContinue
@@ -944,7 +968,7 @@ class UniCryptor3 {
         $reader = [System.IO.FileStream]::new($inputFile.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, [UCFormat]::ChunkSize)
         try {
             $info = $this.ReadContainerInfo($reader)
-            $key = $this.ResolveKey($info, $null, $this.GetLocalPrivateCertificates())
+            $key = $this.ResolveKey($info, $null, $null)
             try {
                 $plain = $this.DecryptContainerToMemory($reader, $key, $info)
                 return [System.Text.Encoding]::UTF8.GetString($plain)
@@ -1005,7 +1029,7 @@ function Get-UCCertificates {
                 $store = [System.Security.Cryptography.X509Certificates.X509Store]::new($name, $location)
                 $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
                 foreach ($cert in $store.Certificates) {
-                    # Only include certificates that have a public key (valid certificates)
+                    # Only include certificates with a usable RSA public key
                     if ($null -ne [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)) {
                         $certs.Add($cert)
                     }
@@ -1090,6 +1114,9 @@ function Protect-UCFile {
     )
     process {
         if (-not $PSCmdlet.ShouldProcess($Path, 'Encrypt')){ return }
+        # An explicitly passed empty password must fail instead of silently switching to certificate mode
+        if ($PSBoundParameters.ContainsKey('Password') -and [string]::IsNullOrEmpty($Password)){ throw [System.ArgumentException]::new('Password must not be empty') }
+        if ($Password -and $Certificate){ Write-Warning 'Both -Password and -Certificate were specified: password mode takes precedence, the certificates are ignored' }
         $uc = [UniCryptor3]::new()
         $item = Get-Item -LiteralPath $Path -ErrorAction Stop
         if ($item.PSIsContainer){
@@ -1123,6 +1150,8 @@ function Unprotect-UCFile {
     )
     process {
         if (-not $PSCmdlet.ShouldProcess($Path, 'Decrypt')){ return }
+        # An explicitly passed empty password must fail instead of silently switching to certificate mode
+        if ($PSBoundParameters.ContainsKey('Password') -and [string]::IsNullOrEmpty($Password)){ throw [System.ArgumentArgumentException]::new('Password must not be empty') }
         $uc = [UniCryptor3]::new()
         $item = Get-Item -LiteralPath $Path -ErrorAction Stop
         if ($item.PSIsContainer){ return $uc.UnprotectFolder($Path, $Destination, [bool]$Overwrite, [bool]$Recurse, $Password) }
