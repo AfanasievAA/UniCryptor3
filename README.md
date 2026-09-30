@@ -137,7 +137,7 @@ $encPath = Protect-UCFile `
     -Certificate $myCert `
     -Overwrite
 
-# Decrypt the file (no need to pass the cert again – local private key is used)
+# Decrypt the file (no need to pass the cert again - local private key is used)
 $decPath = Unprotect-UCFile `
     -Path $encPath `
     -Destination 'C:\Restored' `
@@ -267,16 +267,16 @@ When using the highlevel cmdlets, you can set these options via parameters (`-Co
 
 ## Error Handling & Logging  
 
-* **Exceptions** – All lowlevel errors are thrown as .NET exceptions (`System.IO.IOException`, `System.Security.Cryptography.CryptographicException`, etc.).  
-* **Verbose output** – Use `-Verbose` with any cmdlet to see detailed progress messages.  
-* **Progress** – Controlled by `$uc.Options.ShowProgress` (default `$true`).  
+* **Exceptions** - All lowlevel errors are thrown as .NET exceptions (`System.IO.IOException`, `System.Security.Cryptography.CryptographicException`, etc.).  
+* **Verbose output** - Use `-Verbose` with any cmdlet to see detailed progress messages.  
+* **Progress** - Controlled by `$uc.Options.ShowProgress` (default `$true`).  
 
 Typical error scenarios:
 
 | Situation | What you will see |
 |-----------|-------------------|
 | Wrong password or missing private key | `CryptographicException: Authentication failed: wrong key, certificate or password, or the data is corrupted` |
-| Destination file already exists and `-Overwrite` not specified | `IOException: Output file '…' already exists` |
+| Destination file already exists and `-Overwrite` not specified | `IOException: Output file '...' already exists` |
 | No suitable certificates found | `InvalidOperationException: No encryption certificates configured` |
 | Archive password cannot be retrieved | `FileNotFoundException` or `CryptographicException` depending on the cause. |
 
@@ -284,7 +284,7 @@ Typical error scenarios:
 
 ## License  
 
-This project is licensed under the **MIT License** – see the `LICENSE` file for details.  
+This project is licensed under the **MIT License** - see the `LICENSE` file for details.  
 
 ---  
 

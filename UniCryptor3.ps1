@@ -2,30 +2,30 @@
 <#
 UniCryptor3.ps1
 .SYNOPSIS
-  UniCryptor3 – hybrid certificate‑ and password‑based encryption toolkit for PowerShell.
+  UniCryptor3 - hybrid certificate- and password-based encryption toolkit for PowerShell.
 
 .DESCRIPTION
   The UniCryptor3 class implements a complete encryption solution that works on strings,
-  files, folders and 7‑zip archives.  It uses AES‑256‑GCM for data encryption and supports
-  two key‑transport mechanisms:
-    • RSA‑OAEP‑SHA256 wrapped keys for X.509 certificates (multiple recipients supported)
-    • PBKDF2‑HMAC‑SHA256 derived keys for password‑only protection
+  files, folders and 7-zip archives.  It uses AES-256-GCM for data encryption and supports
+  two key-transport mechanisms:
+    * RSA-OAEP-SHA256 wrapped keys for X.509 certificates (multiple recipients supported)
+    * PBKDF2-HMAC-SHA256 derived keys for password-only protection
 
   Features include:
-    • Chunked AEAD encryption (1 MiB chunks) with built‑in integrity verification.
-    • Transparent container format (header, ciphertext, footer) that can be appended to
-      existing files (e.g., 7‑z archives remain valid after encryption).
-    • Optional metadata encryption (original file size, timestamps) stored inside the
+    * Chunked AEAD encryption (1 MiB chunks) with built-in integrity verification.
+    * Transparent container format (header, ciphertext, footer) that can be appended to
+      existing files (e.g., 7-z archives remain valid after encryption).
+    * Optional metadata encryption (original file size, timestamps) stored inside the
       first plaintext chunk.
-    • Automatic handling of encryption certificates, password prompting, and progress
+    * Automatic handling of encryption certificates, password prompting, and progress
       reporting.
-    • Helper methods for protecting/unprotecting strings, files, folders and archives,
+    * Helper methods for protecting/unprotecting strings, files, folders and archives,
       plus utilities for inspecting container information.
 
 .NOTES
-  Version:        0.6
+  Version:        0.8
   Author:         Andrew Afanasiev
-  Date:           14.09.2026
+  Date:           30.09.2026
   Contacts:       AfanasievAA@yandex.ru
 
 .EXAMPLE
@@ -43,7 +43,7 @@ UniCryptor3.ps1
   Protect-UCFile -Path 'C:\Secrets\notes.txt' -Destination 'C:\Secure' -Password 'P@ssw0rd!' -Overwrite
 
 .EXAMPLE
-  # Encrypt an entire folder recursively and create an certificate-encrypted 7‑zip archive
+  # Encrypt an entire folder recursively and create an certificate-encrypted 7-zip archive
   $certs = Get-UCCertificates -RequirePrivateKey
   Compress-UCArchive -Folder 'C:\Projects' -DestinationPath 'C:\Backups\proj.7z' -Certificate $certs -CompressionLevel High -Overwrite
 
@@ -68,8 +68,99 @@ UniCryptor3.ps1
   No console output from library methods: progress via Write-Progress (Options.ShowProgress), errors via exceptions.
 
 #>
+<#
+LLM Contract
+# legend: *=has shorter overloads, {a,b}=variant group, <x>=substituted token, ?=optional, =def=default, !=throws, @=metadata, #=phase, .main=top-level body, @export=exported
+# types: s=string i=int b=bool o=obj/psobject a=array a<T>=typed array d=datetime r=regex ss=SecureString u=uint ul=ulong dict=Dictionary
 
-# File UniCryptor3.ps1
+UniCryptor3.ps1: AES-GCM container + 7z encryption
+PARAM(b UpdateDependencies?, s DependencyVersion='latest', b SkipDependencyInstall?, s DependencyFolderPath?): dependency control
+@using: SevenZipSharp.dll, 7z64.dll (7Zip4Powershell), UniCryptor.UCGcm (Add-Type C#)
+.main: resolve paths, install/load deps, load AES-GCM helper type
+
+Test-UCDependencies -> b: check dep files present
+Install-UCDependencies(s Version?): download, extract dep files!
+Invoke-UCGcmEncrypt(a<byte>,a<byte>,a<byte>,i,a<byte>) -> a<byte>: encrypt AES-GCM chunk
+Invoke-UCGcmDecrypt(a<byte>,a<byte>,a<byte>,i,a<byte>) -> a<byte>: decrypt AES-GCM chunk!
+Test-UCByteArrayEqual(a<byte> Left,a<byte> Right) -> b: constant-time compare
+New-UCSevenZipCompressor(o Options) -> o: create 7z compressor
+New-UCSevenZipExtractor(s ArchivePath,s Password) -> o: create 7z extractor!
+Register-UC7zProgress(o InputObject,s EventName,s SourceIdentifier): register progress event
+
+UCFormat: container format constants
+P.Magic(a<byte>), Version(u=2), HeaderSize(i=32), ChunkSize(i=1048576), MaxRecipients(i=100), FlagPassword(u=1), FlagMetadata(u=2), DefaultPbkdf2Iterations(ul=300000): format constants
+M.BuildHeader(u Flags,a<byte> Nonce,ul CtLength) -> a<byte>: build 32-byte header!
+M.ParseHeader(a<byte> HeaderBytes) -> o: validate, parse header!
+M.BuildAad(a<byte> HeaderBytes,u ChunkIndex) -> a<byte>: build chunk AAD
+M.NonceFor(a<byte> NonceBase,u ChunkIndex) -> a<byte>: build chunk nonce
+M.Slice(a<byte> Array,i Start,i Length) -> a<byte>: slice byte array!
+
+UCRandom: random generation utilities
+P.PasswordCharset(a<i>): printable charset
+M.NewPassword(i MinLength,i MaxLength) -> s: random password
+M.NewKey -> a<byte>: random 32-byte key
+M.NewNonce -> a<byte>: random 12-byte nonce
+M.NewSalt -> a<byte>: random 16-byte salt
+
+UCMetadata: TLV file metadata block
+M.Build(ul OriginalLength,o CreationTimeUtc?,o LastWriteTimeUtc?) -> a<byte>: build metadata TLV
+M.Parse(a<byte> Buffer) -> o: parse metadata TLV!
+
+UCEnvelope: key transport
+M.GetKeyId(o Certificate) -> a<byte>: derive key ID from thumbprint
+M.WrapKeyForCertificates(a<byte> Key,o Certificates) -> a<byte>: RSA-OAEP wrap key!
+M.ParseRecipients(a<byte> Envelope) -> o: parse recipient entries!
+M.UnwrapKey(a<byte> Envelope,o CandidateCertificates) -> a<byte>: RSA unwrap key
+M.BuildPasswordEnvelope(a<byte> Salt,u Iterations) -> a<byte>: salt+iterations envelope!
+M.ParsePasswordEnvelope(a<byte> Envelope) -> o: parse password envelope!
+M.DeriveKeyFromPassword(s Password,a<byte> Salt,u Iterations) -> a<byte>: PBKDF2-SHA256 key
+
+UCContainer: footer builder
+M.BuildFooter(a<byte> Envelope,ul CtLength) -> a<byte>: build footer with checksum
+
+UniCryptor3: encrypt/decrypt strings, files, folders, 7z
+P.DefaultExtension(s=".AESPKI", static): container extension
+P.Certificates(dict): recipient certs by thumbprint
+P.Compressor(o): 7z compressor
+P.Options(o): ShowProgress/CompressionLevel/EncryptHeaders/OnlyFilesWithArchiveBit/ClearArchiveBit
+P.Pbkdf2Iterations(u=300000): PBKDF2 iterations
+M.AddEncryptionCertificates(o CertificateList): add certs from thumbprints/objects!
+M.SetEncryptionCertificates(o CertificateList): replace cert set!
+M.GetEncryptionCertificates -> o: return configured certs
+M.WriteContainer(o PlainStream,o OutputStream,a<byte> Key,a<byte> Envelope,u Flags,a<byte> MetaBytes?): write encrypted container
+M.ReadContainerInfo(o InputStream) -> o: validate header/footer!
+M.DecryptContainerToMemory(o InputStream,a<byte> Key,o Info) -> a<byte>: decrypt to memory!
+M.DecryptContainerToPath(o InputStream,s OutputPath,a<byte> Key,o Info) -> o: decrypt to file, apply metadata!
+M.ResolveKey(o Info,s Password?,o CandidateCertificates?) -> a<byte>: password/cert key resolve!
+M.ProtectString(s PlainText) -> s: encrypt string, certs!
+M.ProtectStringWithPassword(s PlainText,s Password) -> s: encrypt string, password!
+M.UnprotectString(s ProtectedText,s Password?) -> s: decrypt string!
+M.ProtectFile(s Path,s Destination?,b Overwrite?) -> s: encrypt file, certs!
+M.ProtectFileWithPassword(s Path,s Destination?,s Password,b Overwrite?) -> s: encrypt file, password!
+M.UnprotectFile(s Path,s Destination?,b Overwrite?) -> s: decrypt file!
+M.UnprotectFileWithPassword(s Path,s Destination?,s Password,b Overwrite?) -> s: decrypt file, password!
+M.ProtectFolder(s FolderName,s Destination?,b Overwrite?,b Recurse?) -> o: encrypt folder, certs
+M.ProtectFolderWithPassword(s FolderName,s Destination?,s Password,b Overwrite?,b Recurse?) -> o: encrypt folder, password!
+M.UnprotectFolder(s FolderName,s Destination?,b Overwrite?,b Recurse?,s Password?) -> o: decrypt folder
+M.UnprotectFolderWithPassword(s FolderName,s Destination?,s Password,b Overwrite?,b Recurse?) -> o: decrypt folder, password
+M.GetFileInfo(s Path) -> o: container info, no key!
+M.Compress7Zip(s FolderName,s Destination,b Overwrite?) -> s: encrypted 7z archive!
+M.GetArchivePassword(s ArchivePath) -> s: extract embedded archive password!
+M.GetArchiveContent(s ArchivePath) -> o: list archive entries
+M.Expand7Zip(s ArchivePath,s Destination?,b Overwrite?) -> b: extract encrypted archive!
+
+Get-UCCertificates(a<s> Thumbprint?,b RequirePrivateKey?) -> o: list usable RSA certs
+New-UCSelfSignedCertificate(s Subject?='UniCryptor3') -> o: create encryption cert
+Protect-UCString(s PlainText,o Certificate?,s Password?) -> s: encrypt string!
+Unprotect-UCString(s ProtectedText,s Password?) -> s: decrypt string
+Protect-UCFile(s Path,s Destination?,b Overwrite?,o Certificate?,s Password?,b Recurse?) -> o: encrypt file/folder!
+Unprotect-UCFile(s Path,s Destination?,b Overwrite?,s Password?,b Recurse?) -> o: decrypt file/folder!
+Get-UCFileInfo(s Path) -> o: container info
+Compress-UCArchive(s Folder,s DestinationPath,b Overwrite?,o Certificate?,s CompressionLevel?,b OnlyFilesWithArchiveBit?,b ClearArchiveBit?) -> s: encrypted 7z!
+Expand-UCArchive(s ArchivePath,s Destination?,b Overwrite?) -> b: extract archive!
+Get-UCArchivePassword(s ArchivePath) -> s: archive password
+Get-UCArchiveContent(s ArchivePath) -> o: archive listing
+#>
 [CmdletBinding()]
 param(
     # Force re-download of dependency libraries even when they are already installed

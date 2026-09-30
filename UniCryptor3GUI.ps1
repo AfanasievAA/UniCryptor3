@@ -10,16 +10,16 @@ UniCryptor3GUI.ps1
   a convenient GUI without needing to write PowerShell commands.
 
   Features include:
-    • Certificate management - view, select, and create self-signed certificates
-    • String encryption/decryption - protect sensitive text with certificates or password
-    • File encryption/decryption - protect individual files with certificates or password
-    • Folder encryption/decryption - batch encrypt/decrypt entire folders recursively
-    • Archive operations - create certificate-encrypted 7-zip archives, extract them,
+    * Certificate management - view, select, and create self-signed certificates
+    * String encryption/decryption - protect sensitive text with certificates or password
+    * File encryption/decryption - protect individual files with certificates or password
+    * Folder encryption/decryption - batch encrypt/decrypt entire folders recursively
+    * Archive operations - create certificate-encrypted 7-zip archives, extract them,
       view archive contents, and retrieve archive passwords
-    • Container inspection - view detailed information about encrypted containers
+    * Container inspection - view detailed information about encrypted containers
       including recipients, mode, metadata, and size information
-    • Multi-language support - interface available in multiple languages
-    • Asynchronous operations - all long-running tasks run in background runspaces
+    * Multi-language support - interface available in multiple languages
+    * Asynchronous operations - all long-running tasks run in background runspaces
       with progress indication
 
 .NOTES
@@ -32,7 +32,7 @@ UniCryptor3GUI.ps1
                   modules\Localization.ps1
                   localization\strings.en.json (+ optional strings.<lang>.json)
   Changes:
-    • New features
+    * New features
 
 .EXAMPLE
   # Launch the GUI (auto-relaunches with -STA if needed)
@@ -44,27 +44,27 @@ UniCryptor3GUI.ps1
 
 .DETAILS
   GUI Architecture:
-    • WinForms-based with STA threading requirement for clipboard and UI operations
-    • Asynchronous operations via PowerShell runspaces to keep UI responsive
-    • Status bar with progress indication for all long-running tasks
-    • Drag-and-drop support for file and folder selection
-    • Localization system with language switching without restart
+    * WinForms-based with STA threading requirement for clipboard and UI operations
+    * Asynchronous operations via PowerShell runspaces to keep UI responsive
+    * Status bar with progress indication for all long-running tasks
+    * Drag-and-drop support for file and folder selection
+    * Localization system with language switching without restart
 
   Tabs:
-    • Certificates - manage X.509 certificates from Windows Certificate Store,
+    * Certificates - manage X.509 certificates from Windows Certificate Store,
       select certificates for encryption, create self-signed certificates
-    • String - encrypt/decrypt text with certificate or password mode
-    • File - encrypt/decrypt individual files with destination selection
-    • Folder - batch encrypt/decrypt folders with recursive processing
-    • Archive - create certificate-encrypted 7-zip archives, extract, view content,
+    * String - encrypt/decrypt text with certificate or password mode
+    * File - encrypt/decrypt individual files with destination selection
+    * Folder - batch encrypt/decrypt folders with recursive processing
+    * Archive - create certificate-encrypted 7-zip archives, extract, view content,
       retrieve embedded passwords
-    • Container Info - inspect encrypted containers for detailed metadata
+    * Container Info - inspect encrypted containers for detailed metadata
 
   Security Notes:
-    • Passwords are masked using SystemPasswordChar in input fields
-    • Selected certificates are stored in memory only during the session
-    • All cryptographic operations are performed by UniCryptor3 library
-    • Encrypted outputs are displayed in Base64 format for safe copying
+    * Passwords are masked using SystemPasswordChar in input fields
+    * Selected certificates are stored in memory only during the session
+    * All cryptographic operations are performed by UniCryptor3 library
+    * Encrypted outputs are displayed in Base64 format for safe copying
 #>
 
  $ErrorActionPreference = 'Stop'
